@@ -38,14 +38,19 @@ impl RealityHandshake {
             return self.forward_to_dest(client_stream, &client_hello_record).await;
         }
 
-        // Step 3: 验证 Reality short_id (如果存在)
-        if let Some(short_id) = client_hello.get_reality_short_id() {
-            if !self.validate_short_id(&short_id) {
-                warn!("Short ID 验证失败");
-                return self.forward_to_dest(client_stream, &client_hello_record).await;
-            }
-            debug!("Short ID 验证成功");
+        // Step 3: 验证 Reality short_id
+        // 注意：Reality 的 Short ID 实际上是 Session ID 的前缀
+        // 我们需要检查 session_id 是否以配置中的任何一个 Short ID 开头
+        if !self.validate_short_id(&client_hello.session_id) {
+             let received_hex = hex::encode(&client_hello.session_id);
+             warn!(
+                 "Short ID 验证失败. 收到(Session ID): {}, 期望前缀之一: {:?}",
+                 received_hex,
+                 self.config.short_ids
+             );
+             return self.forward_to_dest(client_stream, &client_hello_record).await;
         }
+        debug!("Short ID 验证成功");
 
         // Step 4: 连接到真实网站获取 ServerHello
         let mut dest_stream = TcpStream::connect(&self.config.dest).await?;
@@ -210,11 +215,17 @@ impl RealityHandshake {
         })
     }
 
-    /// 验证 short_id
-    fn validate_short_id(&self, short_id: &[u8]) -> bool {
-        let short_id_hex = hex::encode(short_id);
+    /// 验证 short_id (Session ID)
+    fn validate_short_id(&self, session_id: &[u8]) -> bool {
+        // 如果配置为空，则允许所有 (或者你可以选择拒绝所有，通常 Reality 需要 Short ID)
+        if self.config.short_ids.is_empty() {
+            return true;
+        }
+
+        let session_id_hex = hex::encode(session_id);
         self.config.short_ids.iter().any(|id| {
-            id.to_lowercase() == short_id_hex.to_lowercase()
+            // 检查 session_id_hex 是否以 id 开头
+            session_id_hex.to_lowercase().starts_with(&id.to_lowercase())
         })
     }
 }
