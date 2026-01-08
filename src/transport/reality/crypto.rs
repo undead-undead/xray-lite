@@ -46,6 +46,8 @@ pub struct TlsKeys {
     pub server_write_key: aead::LessSafeKey,
     pub client_iv: [u8; 12],
     pub server_iv: [u8; 12],
+    pub client_traffic_secret: Vec<u8>,
+    pub server_traffic_secret: Vec<u8>,
 }
 
 impl TlsKeys {
@@ -72,6 +74,8 @@ impl TlsKeys {
                 server_write_key: server_keys.0,
                 client_iv: client_keys.1,
                 server_iv: server_keys.1,
+                client_traffic_secret: client_hs_secret,
+                server_traffic_secret: server_hs_secret,
             },
             handshake_secret,
         ))
@@ -95,6 +99,8 @@ impl TlsKeys {
             server_write_key: server_keys.0,
             client_iv: client_keys.1,
             server_iv: server_keys.1,
+            client_traffic_secret: client_app_secret,
+            server_traffic_secret: server_app_secret,
         })
     }
 
@@ -138,10 +144,13 @@ impl TlsKeys {
     }
 
     pub fn calculate_verify_data(
-        handshake_secret: &hkdf::Prk,
+        traffic_secret_bytes: &[u8],
         handshake_hash: &[u8],
     ) -> Result<Vec<u8>> {
-        let finished_key = expand_label(handshake_secret, b"finished", &[], 32)?;
+        // Convert Traffic Secret bytes to PRK
+        let secret_prk = hkdf::Salt::new(hkdf::HKDF_SHA256, &[]).extract(traffic_secret_bytes);
+
+        let finished_key = expand_label(&secret_prk, b"finished", &[], 32)?;
         let key = hmac::Key::new(hmac::HMAC_SHA256, &finished_key);
         let tag = hmac::sign(&key, handshake_hash);
         Ok(tag.as_ref().to_vec())

@@ -109,7 +109,7 @@ impl RealityHandshake {
         ];
         let hash2 = super::crypto::hash_transcript(&transcript2);
         
-        let verify_data = TlsKeys::calculate_verify_data(&handshake_secret, &hash2)?;
+        let verify_data = TlsKeys::calculate_verify_data(&keys.server_traffic_secret, &hash2)?;
         
         let mut fin_msg = BytesMut::new();
         fin_msg.put_u8(20); // Type Finished
