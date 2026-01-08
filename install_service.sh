@@ -1,5 +1,6 @@
 #!/bin/bash
 
+# systemd Service Installation Script
 # systemd 服务安装脚本
 
 set -e
@@ -10,64 +11,69 @@ YELLOW='\033[1;33m'
 NC='\033[0m'
 
 echo "========================================="
-echo "安装 systemd 服务"
+echo "Install systemd Service / 安装 systemd 服务"
 echo "========================================="
 echo ""
 
-# 检查是否为 root
+# Check if running as root / 检查是否为 root
 if [ "$EUID" -ne 0 ]; then 
-    echo -e "${RED}请使用 root 权限运行此脚本${NC}"
+    echo -e "${RED}Please run this script with root privileges / 请使用 root 权限运行此脚本${NC}"
     echo "sudo ./install_service.sh"
     exit 1
 fi
 
-# 创建安装目录
-echo -e "${YELLOW}[1/5] 创建安装目录...${NC}"
-mkdir -p /opt/vless-reality-xhttp
-echo -e "${GREEN}✓ 目录已创建${NC}"
+# Create installation directory / 创建安装目录
+echo -e "${YELLOW}[1/5] Creating installation directory... / 创建安装目录...${NC}"
+mkdir -p /opt/xray-lite
+echo -e "${GREEN}✓ Directory created / 目录已创建${NC}"
 echo ""
 
-# 复制文件
-echo -e "${YELLOW}[2/5] 复制文件...${NC}"
-cp target/release/vless-server /opt/vless-reality-xhttp/
-cp config.json /opt/vless-reality-xhttp/
-chmod +x /opt/vless-reality-xhttp/vless-server
-echo -e "${GREEN}✓ 文件已复制${NC}"
+# Copy files / 复制文件
+echo -e "${YELLOW}[2/5] Copying files... / 复制文件...${NC}"
+cp target/release/vless-server /opt/xray-lite/
+cp config.json /opt/xray-lite/
+chmod +x /opt/xray-lite/vless-server
+echo -e "${GREEN}✓ Files copied / 文件已复制${NC}"
 echo ""
 
-# 设置权限
-echo -e "${YELLOW}[3/5] 设置权限...${NC}"
-chown -R nobody:nogroup /opt/vless-reality-xhttp
-chmod 600 /opt/vless-reality-xhttp/config.json
-echo -e "${GREEN}✓ 权限已设置${NC}"
+# Set permissions / 设置权限
+echo -e "${YELLOW}[3/5] Setting permissions... / 设置权限...${NC}"
+chown -R nobody:nogroup /opt/xray-lite
+chmod 600 /opt/xray-lite/config.json
+echo -e "${GREEN}✓ Permissions set / 权限已设置${NC}"
 echo ""
 
-# 安装 systemd 服务
-echo -e "${YELLOW}[4/5] 安装 systemd 服务...${NC}"
-cp vless-reality.service /etc/systemd/system/
+# Install systemd service / 安装 systemd 服务
+echo -e "${YELLOW}[4/5] Installing systemd service... / 安装 systemd 服务...${NC}"
+
+# Update service file with correct name / 更新服务文件名称
+sed 's/vless-reality/xray-lite/g' vless-reality.service > /tmp/xray-lite.service
+sed -i 's/vless-reality-xhttp/xray-lite/g' /tmp/xray-lite.service
+
+cp /tmp/xray-lite.service /etc/systemd/system/
 systemctl daemon-reload
-echo -e "${GREEN}✓ 服务已安装${NC}"
+echo -e "${GREEN}✓ Service installed / 服务已安装${NC}"
 echo ""
 
-# 启用并启动服务
-echo -e "${YELLOW}[5/5] 启动服务...${NC}"
-systemctl enable vless-reality
-systemctl start vless-reality
-echo -e "${GREEN}✓ 服务已启动${NC}"
+# Enable and start service / 启用并启动服务
+echo -e "${YELLOW}[5/5] Starting service... / 启动服务...${NC}"
+systemctl enable xray-lite
+systemctl start xray-lite
+echo -e "${GREEN}✓ Service started / 服务已启动${NC}"
 echo ""
 
-# 显示状态
+# Display status / 显示状态
 echo "========================================="
-echo -e "${GREEN}安装完成！${NC}"
+echo -e "${GREEN}Installation Complete! / 安装完成！${NC}"
 echo "========================================="
 echo ""
-echo "服务管理命令:"
-echo "  启动: systemctl start vless-reality"
-echo "  停止: systemctl stop vless-reality"
-echo "  重启: systemctl restart vless-reality"
-echo "  状态: systemctl status vless-reality"
-echo "  日志: journalctl -u vless-reality -f"
+echo "Service Management Commands / 服务管理命令:"
+echo "  Start / 启动: systemctl start xray-lite"
+echo "  Stop / 停止: systemctl stop xray-lite"
+echo "  Restart / 重启: systemctl restart xray-lite"
+echo "  Status / 状态: systemctl status xray-lite"
+echo "  Logs / 日志: journalctl -u xray-lite -f"
 echo ""
-echo "当前状态:"
-systemctl status vless-reality --no-pager
+echo "Current Status / 当前状态:"
+systemctl status xray-lite --no-pager
 echo ""

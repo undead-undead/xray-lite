@@ -4,14 +4,14 @@ use uuid::Uuid;
 
 fn main() -> Result<()> {
     println!("========================================");
-    println!("配置文件生成工具");
+    println!("Configuration File Generator");
     println!("========================================");
     println!();
 
-    // 生成 UUID
+    // Generate UUID
     let uuid = Uuid::new_v4();
 
-    // 生成示例配置
+    // Generate example configuration
     let config = json!({
         "inbounds": [{
             "protocol": "vless",
@@ -52,19 +52,19 @@ fn main() -> Result<()> {
         }
     });
 
-    // 输出配置
-    println!("生成的配置文件 (config.json):");
+    // Output configuration
+    println!("Generated Configuration File (config.json):");
     println!("{}", serde_json::to_string_pretty(&config)?);
     println!();
     println!("========================================");
-    println!("下一步:");
+    println!("Next Steps:");
     println!("========================================");
     println!();
-    println!("1. 运行 'cargo run --bin keygen' 生成密钥对");
-    println!("2. 将私钥和公钥替换到配置文件中");
-    println!("3. 修改 dest 和 serverNames 为你想要伪装的网站");
-    println!("4. 保存配置到 config.json");
-    println!("5. 运行服务器: cargo run --release");
+    println!("1. Run 'cargo run --bin keygen' to generate key pair");
+    println!("2. Replace private and public keys in the configuration");
+    println!("3. Modify dest and serverNames to your desired masquerade website");
+    println!("4. Save configuration to config.json");
+    println!("5. Run server: cargo run --release");
     println!();
 
     Ok(())

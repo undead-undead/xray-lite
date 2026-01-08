@@ -6,41 +6,41 @@ use x25519_dalek::PublicKey;
 
 fn main() -> Result<()> {
     println!("========================================");
-    println!("Xray Reality 密钥生成工具");
+    println!("Xray Reality Key Generation Tool");
     println!("========================================");
     println!();
 
-    // 生成 32 字节随机私钥
+    // Generate 32-byte random private key
     let mut private_bytes = [0u8; 32];
     OsRng.fill_bytes(&mut private_bytes);
 
-    // 计算公钥
+    // Calculate public key
     let public_key = PublicKey::from(private_bytes);
     let public_bytes = public_key.as_bytes();
 
-    // 编码为 Base64 (URL-safe, no padding - Xray 格式)
+    // Encode to Base64 (URL-safe, no padding - Xray format)
     let private_b64 = general_purpose::URL_SAFE_NO_PAD.encode(private_bytes);
     let public_b64 = general_purpose::URL_SAFE_NO_PAD.encode(public_bytes);
 
-    // 输出
+    // Output
     println!("Private key: {}", private_b64);
     println!("Public key:  {}", public_b64);
     println!();
     println!("========================================");
-    println!("使用说明:");
+    println!("Usage Instructions:");
     println!("========================================");
     println!();
-    println!("1. 服务器配置 (config.json):");
+    println!("1. Server Configuration (config.json):");
     println!("   \"realitySettings\": {{");
     println!("     \"privateKey\": \"{}\"", private_b64);
     println!("   }}");
     println!();
-    println!("2. 客户端配置 (Xray):");
+    println!("2. Client Configuration (Xray):");
     println!("   \"realitySettings\": {{");
     println!("     \"publicKey\": \"{}\"", public_b64);
     println!("   }}");
     println!();
-    println!("注意: 请妥善保管私钥，不要泄露！");
+    println!("Note: Keep the private key secure and do not share it!");
     println!();
 
     Ok(())
