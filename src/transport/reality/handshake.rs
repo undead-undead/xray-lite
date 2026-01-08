@@ -51,7 +51,6 @@ impl RealityHandshake {
         )?;
         
         server_hello.modify_for_reality(&self.config.private_key, &client_hello.random)?;
-        debug!("Server Random (after Reality): {}", hex::encode(&server_hello.random));
 
         // 5. 发送 ServerHello 和 CCS
         let sh_bytes = server_hello.encode();
