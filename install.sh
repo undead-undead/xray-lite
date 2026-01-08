@@ -268,6 +268,19 @@ else
 fi
 echo ""
 
+# Check port availability / 检查端口占用
+if lsof -i:$PORT -t >/dev/null 2>&1 ; then
+    echo -e "${RED}Error: Port $PORT is already in use! / 错误: 端口 $PORT 已被占用!${NC}"
+    echo "Please stop the process using port $PORT or choose a different port."
+    echo "请停止占用端口 $PORT 的进程或选择其他端口。"
+    lsof -i:$PORT
+    exit 1
+fi
+if ss -tuln | grep -q ":$PORT " ; then
+    echo -e "${RED}Error: Port $PORT is already in use! / 错误: 端口 $PORT 已被占用!${NC}"
+    exit 1
+fi
+
 # Start service / 启动服务
 echo -e "${YELLOW}Starting Xray-Lite service... / 启动 Xray-Lite 服务...${NC}"
 systemctl start xray-lite
@@ -277,7 +290,9 @@ if systemctl is-active --quiet xray-lite; then
     echo -e "${GREEN}✓ Service started successfully / 服务启动成功${NC}"
 else
     echo -e "${RED}✗ Service failed to start / 服务启动失败${NC}"
-    echo "Check logs / 查看日志: journalctl -u xray-lite -n 50"
+    echo -e "${YELLOW}=== Error Logs / 错误日志 ===${NC}"
+    journalctl -u xray-lite -n 20 --no-pager
+    echo -e "${YELLOW}=============================${NC}"
     exit 1
 fi
 echo ""
