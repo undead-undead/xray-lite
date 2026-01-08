@@ -27,8 +27,19 @@ impl RealityHandshake {
         // if !self.validate_short_id(...) ...
 
         // 2. 提取 Client Key Share
-        let client_key_share = client_hello.get_key_share()
-            .ok_or_else(|| anyhow!("客户端未使用 X25519 Key Share"))?;
+        let client_key_share = match client_hello.get_key_share() {
+            Some(key) => {
+                info!("Got Client Key Share, len: {}", key.len());
+                if key.len() != 32 {
+                     return Err(anyhow!("Invalid X25519 Key Share length: {}", key.len()));
+                }
+                key
+            },
+            None => {
+                warn!("No X25519 Key Share found in ClientHello");
+                return Err(anyhow!("客户端未使用 X25519 Key Share"));
+            }
+        };
 
         // 3. 生成我们的密钥对
         let crypto = RealityCrypto::new();
