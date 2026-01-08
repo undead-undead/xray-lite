@@ -303,6 +303,13 @@ echo ""
 
 # Check port availability / 检查端口占用
 if lsof -i:$PORT -t >/dev/null 2>&1 ; then
+    echo "Port $PORT is in use, attempting to clean up... / 端口 $PORT 被占用，尝试清理..."
+    systemctl stop xray-lite >/dev/null 2>&1 || true
+    pkill -f vless-server || true
+    sleep 2
+fi
+
+if lsof -i:$PORT -t >/dev/null 2>&1 ; then
     echo -e "${RED}Error: Port $PORT is already in use! / 错误: 端口 $PORT 已被占用!${NC}"
     echo "Please stop the process using port $PORT or choose a different port."
     echo "请停止占用端口 $PORT 的进程或选择其他端口。"
