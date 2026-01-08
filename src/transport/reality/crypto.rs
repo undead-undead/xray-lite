@@ -147,10 +147,8 @@ impl TlsKeys {
         traffic_secret_bytes: &[u8],
         handshake_hash: &[u8],
     ) -> Result<Vec<u8>> {
-        // Convert Traffic Secret bytes to PRK
-        let secret_prk = hkdf::Salt::new(hkdf::HKDF_SHA256, &[]).extract(traffic_secret_bytes);
-
-        let finished_key = expand_label(&secret_prk, b"finished", &[], 32)?;
+        // FIX: Use manual expansion to avoid double-extracting the traffic secret
+        let finished_key = expand_label_raw(traffic_secret_bytes, b"finished", &[], 32)?;
         let key = hmac::Key::new(hmac::HMAC_SHA256, &finished_key);
         let tag = hmac::sign(&key, handshake_hash);
         Ok(tag.as_ref().to_vec())
@@ -225,14 +223,46 @@ fn expand_label(prk: &hkdf::Prk, label: &[u8], context: &[u8], len: usize) -> Re
     Ok(out)
 }
 
+// Helper to manual expand without Prk object
+fn manual_hkdf_expand(secret: &[u8], info: &[u8], len: usize) -> Result<Vec<u8>> {
+    let key = hmac::Key::new(hmac::HMAC_SHA256, secret);
+
+    // HKDF-Expand(PRK, info, L)
+    // T(1) = HMAC-Hash(PRK, T(0) | info | 0x01)
+    if len > 32 {
+        return Err(anyhow!("Manual HKDF expand only supports len <= 32"));
+    }
+
+    let mut msg = Vec::with_capacity(info.len() + 1);
+    msg.extend_from_slice(info);
+    msg.push(0x01); // Counter
+
+    let tag = hmac::sign(&key, &msg);
+    let tag_bytes = tag.as_ref();
+
+    Ok(tag_bytes[..len].to_vec())
+}
+
+fn expand_label_raw(secret: &[u8], label: &[u8], context: &[u8], len: usize) -> Result<Vec<u8>> {
+    let mut info = Vec::new();
+    info.extend_from_slice(&(len as u16).to_be_bytes());
+    let full_label = [b"tls13 ", label].concat();
+    info.push(full_label.len() as u8);
+    info.extend_from_slice(&full_label);
+    info.push(context.len() as u8);
+    info.extend_from_slice(context);
+
+    manual_hkdf_expand(secret, &info, len)
+}
+
 fn derive_key_iv(secret: &[u8]) -> Result<(aead::LessSafeKey, [u8; 12])> {
-    let secret_prk = hkdf::Salt::new(hkdf::HKDF_SHA256, &[]).extract(secret);
-    let key_bytes = expand_label(&secret_prk, b"key", &[], 16)?;
+    // FIX: Use expand_label_raw to avoid double extraction
+    let key_bytes = expand_label_raw(secret, b"key", &[], 16)?;
     let unbound_key = aead::UnboundKey::new(&aead::AES_128_GCM, &key_bytes)
         .map_err(|_| anyhow!("Failed to create unbound key"))?;
     let key = aead::LessSafeKey::new(unbound_key);
 
-    let iv_bytes = expand_label(&secret_prk, b"iv", &[], 12)?;
+    let iv_bytes = expand_label_raw(secret, b"iv", &[], 12)?;
     let mut iv = [0u8; 12];
     iv.copy_from_slice(&iv_bytes);
 
