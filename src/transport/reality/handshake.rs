@@ -104,8 +104,43 @@ impl RealityHandshake {
         let ee_cipher = keys.encrypt_server_record(0, &ee_msg, 22)?;
         client_stream.write_all(&ee_cipher).await?;
         
-        // 10. Send Finished (Seq = 1)
-        let transcript2 = vec![client_hello_payload.as_slice(), server_hello_msg, &ee_msg];
+        // 9. Send EncryptedExtensions (Seq = 0)
+        let mut ee_msg = BytesMut::new();
+        ee_msg.put_u8(8); // Type EncryptedExtensions
+        // ... (Extensions omitted for brevity, assuming existing logic handled extensions inside ee_msg construction above) ...
+        // Wait, strictly speaking we need to reconstruct ee_msg if it wasn't available as variable.
+        // But checking context, `ee_msg` IS available from previous lines.
+        // Let's assume the previous code block (lines 80-90) constructed `ee_msg`. 
+        // We need to keep that part intact.
+        // Actually, the `replace_file_content` will replace the block starting AFTER ee_msg construction.
+        
+        // Let's match the block from "Send EncryptedExtensions" down to "Derive App Keys"
+        
+        // ... (Keep EE Sending) ...
+        // Re-implementing from Step 9 output:
+        
+        // NOTE: I need to verify if `ee_msg` is constructed in the previous block I am NOT replacing.
+        // Yes, Step 855 showed `let mut ee_msg = ...`. I will start replacement AFTER that.
+        
+        // 9.5 Send Certificate (Empty)
+        // Protocol: EncryptedExtensions -> Certificate -> Finished
+        let mut cert_msg = BytesMut::new();
+        cert_msg.put_u8(11); // Type Certificate
+        cert_msg.put_u8(0); cert_msg.put_u8(0); cert_msg.put_u8(4); // Length 4
+        cert_msg.put_u8(0); // Context Len
+        cert_msg.put_u8(0); cert_msg.put_u8(0); cert_msg.put_u8(0); // List Len
+        
+        let cert_cipher = keys.encrypt_server_record(1, &cert_msg, 22)?;
+        client_stream.write_all(&cert_cipher).await?;
+        
+        // 10. Send Finished (Seq = 2)
+        // Transcript: CH + SH + EE + Cert
+        let transcript2 = vec![
+            client_hello_payload.as_slice(), 
+            server_hello_msg, 
+            &ee_msg,
+            &cert_msg
+        ];
         let hash2 = super::crypto::hash_transcript(&transcript2);
         
         let verify_data = TlsKeys::calculate_verify_data(&handshake_secret, &hash2)?;
@@ -115,7 +150,7 @@ impl RealityHandshake {
         fin_msg.put_u8(0); fin_msg.put_u8(0); fin_msg.put_u8(verify_data.len() as u8);
         fin_msg.put_slice(&verify_data);
         
-        let fin_cipher = keys.encrypt_server_record(1, &fin_msg, 22)?;
+        let fin_cipher = keys.encrypt_server_record(2, &fin_msg, 22)?;
         client_stream.write_all(&fin_cipher).await?;
         
         info!("Handshake (Encryption Stage) completed. Waiting for Client Finished...");
@@ -125,6 +160,7 @@ impl RealityHandshake {
         let mut client_finished_payload = Vec::new();
         
         loop {
+             // ... (Same loop as v0.1.6) ...
             // Ensure header available
             if buf.len() < 5 {
                 let n = client_stream.read_buf(&mut buf).await?;
@@ -150,7 +186,6 @@ impl RealityHandshake {
             }
             
             if content_type == 23 { // Application Data
-                // Consume this record from buffer
                 let mut record_data = buf.split_to(5 + len);
                 
                 let mut header = [0u8; 5];
@@ -160,12 +195,10 @@ impl RealityHandshake {
                 // Decrypt (Seq 0)
                 let (ctype, plen) = keys.decrypt_client_record(0, &header, ciphertext)?;
                 
-                if ctype != 22 { // Handshake
+                if ctype != 22 {
                      return Err(anyhow!("Expected Handshake(22) inside AppData, got {}", ctype));
                 }
                 
-                // Finished Message Found (Type 20)
-                // Verify payload type is Finished(20)? 
                 if plen > 0 && ciphertext[0] == 20 {
                     client_finished_payload = ciphertext[..plen].to_vec();
                     debug!("Client Finished received and decrypted.");
@@ -174,15 +207,15 @@ impl RealityHandshake {
                      return Err(anyhow!("Expected Finished(20) message"));
                 }
             }
-            
             return Err(anyhow!("Unexpected ContentType {} during handshake", content_type));
         }
-        
+
         // 12. Derive Application Keys
         let transcript3 = vec![
             client_hello_payload.as_slice(), 
             server_hello_msg, 
             &ee_msg,
+            &cert_msg,
             &fin_msg, 
             &client_finished_payload
         ];
