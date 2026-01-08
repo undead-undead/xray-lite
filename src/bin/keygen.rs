@@ -2,7 +2,7 @@ use anyhow::Result;
 use base64::{engine::general_purpose, Engine as _};
 use rand::rngs::OsRng;
 use rand::RngCore;
-use x25519_dalek::PublicKey;
+use x25519_dalek::{PublicKey, StaticSecret};
 
 fn main() -> Result<()> {
     println!("========================================");
@@ -10,12 +10,12 @@ fn main() -> Result<()> {
     println!("========================================");
     println!();
 
-    // Generate 32-byte random private key
-    let mut private_bytes = [0u8; 32];
-    OsRng.fill_bytes(&mut private_bytes);
+    // Generate random static secret (private key)
+    let secret = StaticSecret::random_from_rng(OsRng);
+    let private_bytes = secret.to_bytes();
 
     // Calculate public key
-    let public_key = PublicKey::from(private_bytes);
+    let public_key = PublicKey::from(&secret);
     let public_bytes = public_key.as_bytes();
 
     // Encode to Base64 (URL-safe, no padding - Xray format)
