@@ -33,7 +33,7 @@ if ! ./gh auth status &> /dev/null; then
 fi
 
 # 3. 创建 Release
-VERSION="v0.1.23"
+VERSION="v0.1.24"
 FILE="release/xray-lite-x86_64-unknown-linux-gnu.tar.gz"
 
 if [ ! -f "$FILE" ]; then
