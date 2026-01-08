@@ -18,11 +18,11 @@ impl RealityHandshake {
         Self { config }
     }
 
-    /// 执行 Reality TLS 握手 (v0.1.18: 修复空证书状态机)
+    /// 执行 Reality TLS 握手 (v0.1.19: 独立记录发送模式)
     pub async fn perform(&self, mut client_stream: TcpStream) -> Result<super::stream::TlsStream<TcpStream>> {
         // 1. 读取 ClientHello
         let (client_hello, client_hello_payload) = self.read_client_hello(&mut client_stream).await?;
-        debug!("ClientHello received");
+        debug!("ClientHello received (len: {})", client_hello_payload.len());
 
         // 2. 提取 Client Key Share
         let client_key_share = match client_hello.get_key_share() {
@@ -59,35 +59,42 @@ impl RealityHandshake {
             &super::crypto::hash_transcript(&transcript0)
         )?;
         
-        // 7. 构造加密握手消息序列
+        // 7. 构造握手消息并独立发送 (Sequence Number: 0, 1, 2)
         
         // 7.1 EncryptedExtensions (EE)
-        let mut ee_content = BytesMut::new();
-        ee_content.put_u16(16); // Type ALPN
-        let mut alpn_list = BytesMut::new();
-        alpn_val(&mut alpn_list, b"h2");
-        alpn_val(&mut alpn_list, b"http/1.1");
-        ee_content.put_u16((alpn_list.len() + 2) as u16); 
-        ee_content.put_u16(alpn_list.len() as u16);      
-        ee_content.put_slice(&alpn_list);
+        let mut extensions = BytesMut::new();
+        // ALPN extension
+        extensions.put_u16(16); // Type ALPN
+        let mut alpn = BytesMut::new();
+        alpn_val(&mut alpn, b"h2");
+        // alpn_val(&mut alpn, b"http/1.1"); // Only h2 for robustness
+        extensions.put_u16((alpn.len() + 2) as u16);
+        extensions.put_u16(alpn.len() as u16);
+        extensions.put_slice(&alpn);
 
         let mut ee_msg = BytesMut::new();
         ee_msg.put_u8(8); // Type EE
-        let ee_len = (ee_content.len() + 2) as u32;
-        ee_msg.put_slice(&ee_len.to_be_bytes()[1..4]);
-        ee_msg.put_u16(ee_content.len() as u16); 
-        ee_msg.put_slice(&ee_content);
+        let ee_body_len = (extensions.len() + 2) as u32;
+        ee_msg.put_slice(&ee_body_len.to_be_bytes()[1..4]);
+        ee_msg.put_u16(extensions.len() as u16);
+        ee_msg.put_slice(&extensions);
+        
+        // 发送 EE (Record Seq 0)
+        let ee_record = hs_keys.encrypt_server_record(0, &ee_msg, 22)?;
+        client_stream.write_all(&ee_record).await?;
         
         // 7.2 Certificate (Cert) - Empty List
-        // RFC 8446: If list is empty, omit CertificateVerify
         let mut cert_msg = BytesMut::new();
         cert_msg.put_u8(11); // Type Certificate
         cert_msg.put_u8(0); cert_msg.put_u8(0); cert_msg.put_u8(4);
         cert_msg.put_u8(0); // Context Len
         cert_msg.put_u8(0); cert_msg.put_u8(0); cert_msg.put_u8(0); // List Len
         
+        // 发送 Cert (Record Seq 1)
+        let cert_record = hs_keys.encrypt_server_record(1, &cert_msg, 22)?;
+        client_stream.write_all(&cert_record).await?;
+        
         // 7.3 Finished (Fin)
-        // Transcript for Server Finished: CH + SH + EE + Cert
         let transcript1 = vec![
             client_hello_payload.as_slice(), 
             server_hello.handshake_payload(),
@@ -103,17 +110,13 @@ impl RealityHandshake {
         fin_msg.put_slice(&fin_len.to_be_bytes()[1..4]);
         fin_msg.put_slice(&verify_data);
         
-        // 8. 打包发送 (EE + Cert + Fin)
-        let mut bundle = BytesMut::new();
-        bundle.put_slice(&ee_msg);
-        bundle.put_slice(&cert_msg);
-        bundle.put_slice(&fin_msg);
+        // 发送 Fin (Record Seq 2)
+        let fin_record = hs_keys.encrypt_server_record(2, &fin_msg, 22)?;
+        client_stream.write_all(&fin_record).await?;
         
-        let cipher = hs_keys.encrypt_server_record(0, &bundle, 22)?;
-        client_stream.write_all(&cipher).await?;
-        debug!("Encrypted handshake bundle sent (EE, Cert, Fin)");
+        info!("Handshake (EE, Cert, Fin) sent separately. Waiting for client Finished...");
 
-        // 9. 读取客户端响应 (SEQ=0)
+        // 8. 读取客户端响应 (SEQ=0)
         let mut buf = BytesMut::with_capacity(4096);
         let mut client_finished_payload = Vec::new();
         
@@ -127,31 +130,32 @@ impl RealityHandshake {
             let rlen = u16::from_be_bytes([buf[3], buf[4]]) as usize;
             if buf.len() < 5 + rlen {
                 let n = client_stream.read_buf(&mut buf).await?;
-                if n == 0 { return Err(anyhow!("EOF in handshake")); }
+                if n == 0 { return Err(anyhow!("EOF in handshake read")); }
                 continue;
             }
             
             let mut record_data = buf.split_to(5 + rlen);
-            if ctype == 20 { continue; } // CCS
+            if ctype == 20 { continue; } // Skip CCS
             if ctype == 23 {
                 let mut header = [0u8; 5];
                 header.copy_from_slice(&record_data[..5]);
-                // Client sequence starts at 0 for handshake
+                // Client starts at seq 0
                 let (inner_type, plen) = hs_keys.decrypt_client_record(0, &header, &mut record_data[5..])?;
                 
                 if inner_type == 21 {
-                    warn!("Client Alert: {}/{}", record_data[5], record_data[6]);
-                    return Err(anyhow!("Client sent Alert {}/{}", record_data[5], record_data[6]));
+                    warn!("Client Alert decypted: {}/{}", record_data[5], record_data[6]);
+                    return Err(anyhow!("Handshake failed: Client Alert {}/{}", record_data[5], record_data[6]));
                 }
                 if inner_type == 22 && record_data[5] == 20 {
                     client_finished_payload = record_data[5..5+plen].to_vec();
-                    debug!("Client Finished received and decrypted!");
+                    debug!("Client Finished received!");
                     break;
                 }
             }
+            return Err(anyhow!("Unexpected Record Type: {}", ctype));
         }
         
-        // 10. 推导应用密钥 (Transcript Hash must include Server Finished)
+        // 9. 推导应用密钥
         let transcript_app = vec![
             client_hello_payload.as_slice(), 
             server_hello.handshake_payload(),
