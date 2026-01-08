@@ -83,7 +83,7 @@ impl RealityHandshake {
         debug!("EncryptedExtensions encrypted: {}", hex::encode(&ee_record));
         client_stream.write_all(&ee_record).await?;
         
-        // Certificate (空)
+        // Certificate (空) - RFC 8446: 如果证书列表为空，不发送 CertificateVerify
         let cert_msg = vec![11, 0, 0, 4, 0, 0, 0, 0];
         debug!("Certificate plaintext: {}", hex::encode(&cert_msg));
         
@@ -91,21 +91,12 @@ impl RealityHandshake {
         debug!("Certificate encrypted: {}", hex::encode(&cert_record));
         client_stream.write_all(&cert_record).await?;
         
-        // CertificateVerify (虚拟)
-        let cv_msg = self.build_dummy_certificate_verify();
-        debug!("CertificateVerify plaintext: {}", hex::encode(&cv_msg));
-        
-        let cv_record = hs_keys.encrypt_server_record(2, &cv_msg, 22)?;
-        debug!("CertificateVerify encrypted: {}", hex::encode(&cv_record));
-        client_stream.write_all(&cv_record).await?;
-        
-        // Finished
+        // Finished (直接在 Certificate 之后，跳过 CertificateVerify)
         let transcript1 = vec![
             client_hello_raw.as_slice(),
             server_hello.handshake_payload(),
             &ee_msg,
-            &cert_msg,
-            &cv_msg
+            &cert_msg
         ];
         let hash1 = super::crypto::hash_transcript(&transcript1);
         debug!("Transcript Hash (for Finished): {}", hex::encode(&hash1));
@@ -120,7 +111,7 @@ impl RealityHandshake {
         fin_msg.put_slice(&verify_data);
         debug!("Finished plaintext: {}", hex::encode(&fin_msg));
         
-        let fin_record = hs_keys.encrypt_server_record(3, &fin_msg, 22)?;
+        let fin_record = hs_keys.encrypt_server_record(2, &fin_msg, 22)?;
         debug!("Finished encrypted: {}", hex::encode(&fin_record));
         client_stream.write_all(&fin_record).await?;
         
@@ -191,7 +182,6 @@ impl RealityHandshake {
             server_hello.handshake_payload(),
             &ee_msg,
             &cert_msg,
-            &cv_msg,
             &fin_msg
         ];
         let app_keys = TlsKeys::derive_application_keys(&handshake_secret, &super::crypto::hash_transcript(&transcript_app))?;
@@ -200,16 +190,6 @@ impl RealityHandshake {
         Ok(super::stream::TlsStream::new_with_buffer(client_stream, app_keys, buf))
     }
 
-    fn build_dummy_certificate_verify(&self) -> Vec<u8> {
-        let dummy_sig = vec![0u8; 64];
-        let mut msg = BytesMut::new();
-        msg.put_u8(15); // Type
-        msg.put_u8(0); msg.put_u8(0); msg.put_u8(66); // Length
-        msg.put_u16(0x0403); // Algorithm: ecdsa_secp256r1_sha256
-        msg.put_u16(64); // Signature length
-        msg.put_slice(&dummy_sig);
-        msg.to_vec()
-    }
 
     async fn read_client_hello(&self, stream: &mut TcpStream) -> Result<(ClientHello, Vec<u8>)> {
         let mut buf = BytesMut::with_capacity(4096);
