@@ -54,6 +54,22 @@ esac
 echo -e "${GREEN}Detected architecture / 检测到架构: $ARCH${NC}"
 echo ""
 
+# Stop existing service / 停止现有服务
+echo -e "${YELLOW}Checking for existing installation... / 检查现有安装...${NC}"
+if systemctl is-active --quiet xray-lite; then
+    echo "Stopping existing xray-lite service... / 停止现有 xray-lite 服务..."
+    systemctl stop xray-lite
+    systemctl disable xray-lite
+fi
+
+# Kill any lingering vless-server processes
+pkill -f vless-server || true
+
+# Check if port is still in use after cleanup
+# If it's still in use, it might be another web server like Nginx
+# We warn the user but don't force kill unknown processes
+echo ""
+
 # Create installation directory / 创建安装目录
 INSTALL_DIR="/opt/xray-lite"
 echo -e "${YELLOW}[1/6] Creating installation directory... / 创建安装目录...${NC}"
