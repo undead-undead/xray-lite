@@ -209,9 +209,12 @@ cat > client-config.json << EOF
 }
 EOF
 
-chmod 600 config.json
-echo -e "${GREEN}✓ Configuration generated / 配置已生成${NC}"
-echo ""
+# Set permissions explicitly / 显式设置权限
+echo -e "${YELLOW}Setting permissions... / 设置权限...${NC}"
+chown -R nobody:nogroup $INSTALL_DIR
+chmod 755 $INSTALL_DIR
+chmod 644 $INSTALL_DIR/config.json
+chmod 755 $INSTALL_DIR/vless-server
 
 # Install systemd service / 安装 systemd 服务
 echo -e "${YELLOW}[5/6] Installing systemd service... / 安装 systemd 服务...${NC}"
@@ -231,11 +234,12 @@ ExecStart=$INSTALL_DIR/vless-server --config $INSTALL_DIR/config.json
 Restart=on-failure
 RestartSec=10s
 
-NoNewPrivileges=true
-PrivateTmp=true
-ProtectSystem=strict
-ProtectHome=true
-ReadWritePaths=$INSTALL_DIR
+# Security hardening disabled for compatibility
+# NoNewPrivileges=true
+# PrivateTmp=true
+# ProtectSystem=strict
+# ProtectHome=true
+# ReadWritePaths=$INSTALL_DIR
 
 LimitNOFILE=1000000
 LimitNPROC=512
@@ -255,11 +259,21 @@ echo ""
 
 # Configure firewall / 配置防火墙
 echo -e "${YELLOW}[6/6] Configuring firewall... / 配置防火墙...${NC}"
+# Ensure PORT is numeric again just in case
+if [[ ! "$PORT" =~ ^[0-9]+$ ]]; then
+    PORT=443
+fi
+
 if command -v ufw &> /dev/null; then
-    ufw allow $PORT/tcp
-    echo -e "${GREEN}✓ Firewall configured (ufw) / 防火墙已配置 (ufw)${NC}"
+    # Check if ufw is active
+    if ufw status | grep -q "Status: active"; then
+        ufw allow $PORT/tcp
+        echo -e "${GREEN}✓ Firewall configured (ufw) / 防火墙已配置 (ufw)${NC}"
+    else
+        echo -e "${YELLOW}⚠ ufw is installed but not active / ufw 已安装但未启用${NC}"
+    fi
 elif command -v firewall-cmd &> /dev/null; then
-    firewall-cmd --permanent --add-port=$PORT/tcp
+    firewall-cmd --permanent --add-port=${PORT}/tcp
     firewall-cmd --reload
     echo -e "${GREEN}✓ Firewall configured (firewalld) / 防火墙已配置 (firewalld)${NC}"
 else
