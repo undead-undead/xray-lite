@@ -218,6 +218,8 @@ impl RealityHandshake {
     }
 
     fn build_certificate_verify(&self, transcript_hash: &[u8], cert: &rcgen::Certificate) -> Result<Vec<u8>> {
+        use sha2::{Sha256, Digest};
+        
         // 构造签名内容（TLS 1.3 格式）
         let mut content = Vec::new();
         content.extend_from_slice(&[0x20u8; 64]); // 64 个空格
@@ -225,11 +227,25 @@ impl RealityHandshake {
         content.push(0x00);
         content.extend_from_slice(transcript_hash);
         
-        // 使用证书的密钥对进行签名
-        // rcgen 默认使用 ECDSA P-256
-        let key_pair = cert.get_key_pair();
-        let signature = key_pair.sign(&content)
-            .map_err(|e| anyhow!("Failed to sign: {}", e))?;
+        // 计算内容的 SHA256 哈希
+        let mut hasher = Sha256::new();
+        hasher.update(&content);
+        let hash = hasher.finalize();
+        
+        // 使用 ring 进行 ECDSA 签名
+        use ring::signature::{EcdsaKeyPair, ECDSA_P256_SHA256_FIXED_SIGNING};
+        use ring::rand::SystemRandom;
+        
+        let rng = SystemRandom::new();
+        
+        // 从证书获取私钥 DER
+        let key_der = cert.serialize_private_key_der();
+        
+        let key_pair = EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &key_der, &rng)
+            .map_err(|e| anyhow!("Failed to parse key: {:?}", e))?;
+        
+        let signature = key_pair.sign(&rng, &hash)
+            .map_err(|e| anyhow!("Failed to sign: {:?}", e))?;
         
         let mut msg = BytesMut::new();
         msg.put_u8(15); // Type: CertificateVerify
