@@ -33,25 +33,35 @@ A high-performance VLESS+Reality+XHTTP proxy server implemented in Rust, fully c
 
 ## 🚀 Quick Start
 
-### Method 1: One-Click Deployment (Recommended)
+### Method 1: One-Click Installation (Recommended)
+
+Run the following command on your server (requires root):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/undead-undead/xray-lite/main/install.sh | bash
+```
+
+The script will automatically:
+1. ⬇️ Download the latest binary from GitHub Release
+2. 🔑 Generate keys and UUID
+3. ⚙️ Configure systemd service
+4. 🔥 Start the server
+5. 📱 Show client configuration
+
+### Method 2: Build from Source
 
 ```bash
 # Clone the project
 git clone https://github.com/undead-undead/xray-lite.git
 cd xray-lite
 
-# One-click deployment
+# Build and run
 ./deploy.sh
 ```
 
-The script will automatically:
-1. ✅ Generate X25519 key pair
-2. ✅ Generate client UUID
-3. ✅ Create server configuration
-4. ✅ Compile server
-5. ✅ Generate client configuration
+The script will verify your build environment and compile release binaries.
 
-### Method 2: Manual Configuration
+### Method 3: Manual Configuration
 
 #### 1. Generate Key Pair
 

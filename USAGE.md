@@ -2,25 +2,25 @@
 
 ## 🚀 Quick Start
 
-### Method 1: One-Click Deployment (Recommended)
+### Method 1: One-Click Installation (Recommended)
+
+Run as root:
 
 ```bash
-# Clone the project
+curl -fsSL https://raw.githubusercontent.com/undead-undead/xray-lite/main/install.sh | bash
+```
+
+The script performs a binary installation without requiring Rust/Cargo environment.
+
+### Method 2: Build from Source
+
+```bash
 git clone https://github.com/undead-undead/xray-lite.git
 cd xray-lite
-
-# Run one-click deployment script
 ./deploy.sh
 ```
 
-The script will automatically:
-1. ✅ Generate X25519 key pair
-2. ✅ Generate client UUID
-3. ✅ Create server configuration
-4. ✅ Compile the server
-5. ✅ Generate client configuration
-
-### Method 2: Manual Configuration
+### Method 3: Manual Configuration
 
 #### Step 1: Generate Key Pair
 
