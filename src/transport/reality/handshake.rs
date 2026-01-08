@@ -25,8 +25,13 @@ impl RealityHandshake {
         info!("ClientHello received, SNI: {:?}", client_hello.get_sni());
         
         // 2. 验证 Reality 认证
+        debug!("Client SessionID: {}", hex::encode(&client_hello.session_id));
+        debug!("Client Random: {}", hex::encode(&client_hello.random));
+        
         let auth = super::auth::RealityAuth::new(&self.config.private_key)?;
         let is_reality_client = auth.verify_client_auth(&client_hello.random, &client_hello.session_id);
+        
+        debug!("Reality authentication result: {}", is_reality_client);
         
         if !is_reality_client {
             warn!("Reality authentication failed - falling back to dest");
