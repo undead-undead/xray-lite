@@ -412,6 +412,10 @@ impl ServerHello {
         record.put_slice(&self.raw_data);
         record.to_vec()
     }
+
+    pub fn handshake_payload(&self) -> &[u8] {
+        &self.raw_data
+    }
 }
 
 #[cfg(test)]

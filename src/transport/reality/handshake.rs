@@ -1,5 +1,5 @@
 use anyhow::{anyhow, Result};
-use bytes::BytesMut;
+use bytes::{BytesMut, Buf, BufMut}; // Added Buf trait
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tracing::{debug, info, warn};
@@ -50,80 +50,46 @@ impl RealityHandshake {
         debug!("Derived Shared Secret successfully");
 
         // 5. 构造 ServerHello
-        let mut temp_random = [0u8; 32]; // Zero random initially
+        let temp_random = [0u8; 32]; // Zero random initially
         let mut server_hello = super::tls::ServerHello::new_reality(
             &client_hello.session_id,
             temp_random,
             &my_public_key
         )?;
         
-        // 注入 Reality Auth
-        server_hello.modify_for_reality(&self.config.private_key, client_hello.get_random())?;
+        // 6. 注入 Reality Auth
+        server_hello.modify_for_reality(&self.config.private_key, &client_hello.random)?;
 
-        // 6. 发送 ServerHello
-        client_stream.write_all(&server_hello.encode()).await?;
-
-        // 7. 发送 ChangeCipherSpec
-        client_stream.write_all(&[0x14, 0x03, 0x03, 0x00, 0x01, 0x01]).await?;
-
-        // 8. 计算 Handshake Keys
-        use bytes::BufMut;
+        // 7. 发送 ServerHello
         let server_hello_record = server_hello.encode();
-        let server_hello_msg = &server_hello_record[5..]; // Skip record headers
+        client_stream.write_all(&server_hello_record).await?;
         
-        let transcript1 = vec![client_hello_payload.as_slice(), server_hello_msg];
-        let hash1 = super::crypto::hash_transcript(&transcript1);
+        // 8. Derive Handshake Keys
+        // Transcript: ClientHello + ServerHello (Handshake Msgs Only)
+        // Correctly use payload without record header
+        let transcript1 = vec![client_hello_payload.as_slice(), server_hello.handshake_payload()];
+        let (mut keys, handshake_secret) = TlsKeys::derive_handshake_keys(
+            &shared_secret, 
+            &super::crypto::hash_transcript(&transcript1)
+        )?;
         
-        let (keys, handshake_secret) = TlsKeys::derive_handshake_keys(&shared_secret, &hash1)?;
-        
-        // 9. Send EncryptedExtensions
-        // Type(8), Len(low24), Payload
-        // Extension: ALPN (h2, http/1.1)
-        let mut ee_msg = BytesMut::new();
-        ee_msg.put_u8(8); 
-        ee_msg.put_u8(0); ee_msg.put_u8(0); ee_msg.put_u8(0); // Length holder
-        
-        let mut ee_exts = BytesMut::new();
-        ee_exts.put_u16(16); // Type ALPN
-        let mut alpn_val = BytesMut::new();
-        alpn_val.put_u16(14); 
-        alpn_val.put_u8(2); alpn_val.put_slice(b"h2");
-        alpn_val.put_u8(8); alpn_val.put_slice(b"http/1.1");
-        
-        ee_exts.put_u16(alpn_val.len() as u16); // Ext Data Len
-        ee_exts.put_slice(&alpn_val);
-        
-        ee_msg.put_u16(ee_exts.len() as u16); // Extensions Block Len
-        ee_msg.put_slice(&ee_exts);
-        
-        // Fix Msg Length
-        let ee_len = ee_msg.len() - 4;
-        let ee_len_bytes = (ee_len as u32).to_be_bytes();
-        ee_msg[1] = ee_len_bytes[1]; ee_msg[2] = ee_len_bytes[2]; ee_msg[3] = ee_len_bytes[3];
-        
-        let ee_cipher = keys.encrypt_server_record(0, &ee_msg, 22)?;
-        client_stream.write_all(&ee_cipher).await?;
+        debug!("Derived Handshake Keys");
         
         // 9. Send EncryptedExtensions (Seq = 0)
         let mut ee_msg = BytesMut::new();
         ee_msg.put_u8(8); // Type EncryptedExtensions
-        // ... (Extensions omitted for brevity, assuming existing logic handled extensions inside ee_msg construction above) ...
-        // Wait, strictly speaking we need to reconstruct ee_msg if it wasn't available as variable.
-        // But checking context, `ee_msg` IS available from previous lines.
-        // Let's assume the previous code block (lines 80-90) constructed `ee_msg`. 
-        // We need to keep that part intact.
-        // Actually, the `replace_file_content` will replace the block starting AFTER ee_msg construction.
+        ee_msg.put_u8(0); ee_msg.put_u8(0); ee_msg.put_u8(16); // Length 16
+        // ALPN Extension (h2, http/1.1)
+        ee_msg.put_u16(16); // Extension Type ALPN
+        ee_msg.put_u16(12); // Extension Len
+        ee_msg.put_u16(10); // ALPN List Len
+        ee_msg.put_u8(2); ee_msg.put_slice(b"h2");
+        ee_msg.put_u8(8); ee_msg.put_slice(b"http/1.1");
         
-        // Let's match the block from "Send EncryptedExtensions" down to "Derive App Keys"
-        
-        // ... (Keep EE Sending) ...
-        // Re-implementing from Step 9 output:
-        
-        // NOTE: I need to verify if `ee_msg` is constructed in the previous block I am NOT replacing.
-        // Yes, Step 855 showed `let mut ee_msg = ...`. I will start replacement AFTER that.
-        
-        // 9.5 Send Certificate (Empty)
-        // Protocol: EncryptedExtensions -> Certificate -> Finished
+        let ee_cipher = keys.encrypt_server_record(0, &ee_msg, 22)?;
+        client_stream.write_all(&ee_cipher).await?;
+
+        // 9.5 Send Certificate (Empty) (Seq = 1)
         let mut cert_msg = BytesMut::new();
         cert_msg.put_u8(11); // Type Certificate
         cert_msg.put_u8(0); cert_msg.put_u8(0); cert_msg.put_u8(4); // Length 4
@@ -137,7 +103,7 @@ impl RealityHandshake {
         // Transcript: CH + SH + EE + Cert
         let transcript2 = vec![
             client_hello_payload.as_slice(), 
-            server_hello_msg, 
+            server_hello.handshake_payload(),
             &ee_msg,
             &cert_msg
         ];
@@ -160,7 +126,6 @@ impl RealityHandshake {
         let mut client_finished_payload = Vec::new();
         
         loop {
-             // ... (Same loop as v0.1.6) ...
             // Ensure header available
             if buf.len() < 5 {
                 let n = client_stream.read_buf(&mut buf).await?;
@@ -180,12 +145,12 @@ impl RealityHandshake {
             // Check Record Type
             if content_type == 20 { // ChangeCipherSpec
                 debug!("Received CCS (Type 20), skipping");
-                use bytes::Buf;
                 buf.advance(5 + len);
                 continue;
             }
             
             if content_type == 23 { // Application Data
+                // Consume this record from buffer
                 let mut record_data = buf.split_to(5 + len);
                 
                 let mut header = [0u8; 5];
@@ -195,10 +160,11 @@ impl RealityHandshake {
                 // Decrypt (Seq 0)
                 let (ctype, plen) = keys.decrypt_client_record(0, &header, ciphertext)?;
                 
-                if ctype != 22 {
+                if ctype != 22 { // Handshake
                      return Err(anyhow!("Expected Handshake(22) inside AppData, got {}", ctype));
                 }
                 
+                // Finished Message Found (Type 20)
                 if plen > 0 && ciphertext[0] == 20 {
                     client_finished_payload = ciphertext[..plen].to_vec();
                     debug!("Client Finished received and decrypted.");
@@ -207,13 +173,14 @@ impl RealityHandshake {
                      return Err(anyhow!("Expected Finished(20) message"));
                 }
             }
+            
             return Err(anyhow!("Unexpected ContentType {} during handshake", content_type));
         }
-
+        
         // 12. Derive Application Keys
         let transcript3 = vec![
             client_hello_payload.as_slice(), 
-            server_hello_msg, 
+            server_hello.handshake_payload(),
             &ee_msg,
             &cert_msg,
             &fin_msg, 
@@ -246,10 +213,8 @@ impl RealityHandshake {
                      let client_hello = ClientHello::parse(&record.payload)?;
                      // 还要保留原始数据用来做 Hash
                      // TlsRecord::parse 只是剥离了 Record Header (5 bytes)
-                     // 我们需要整个 Record 数据（含 Header）作为 Transcript 吗？
-                     // TLS 1.3 TranscriptHash 輸入是 Handshake Messages (不含 Record Layer Header)
-                     // 即 ClientHello 和 ServerHello 的 Payload 部分。
-                     return Ok((client_hello, record.payload)); // Return payload directly
+                     // return record.payload (which is Handshake Msg) as raw_data
+                     return Ok((client_hello, record.payload));
                 }
             }
         }
