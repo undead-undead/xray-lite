@@ -1,0 +1,32 @@
+[Unit]
+Description=VLESS Reality XHTTP Server
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=nobody
+Group=nogroup
+WorkingDirectory=/opt/vless-reality-xhttp
+ExecStart=/opt/vless-reality-xhttp/vless-server --config /opt/vless-reality-xhttp/config.json --log-level info
+Restart=on-failure
+RestartSec=10s
+
+# 安全设置
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/vless-reality-xhttp
+
+# 资源限制
+LimitNOFILE=1000000
+LimitNPROC=512
+
+# 日志
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=vless-server
+
+[Install]
+WantedBy=multi-user.target

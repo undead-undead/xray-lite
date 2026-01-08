@@ -1,0 +1,46 @@
+{
+    "inbounds": [
+        {
+            "protocol": "vless",
+            "listen": "0.0.0.0",
+            "port": 8443,
+            "settings": {
+                "clients": [
+                    {
+                        "id": "b831381d-6324-4d53-ad4f-8cda48b30811",
+                        "flow": "",
+                        "email": "test@example.com"
+                    }
+                ],
+                "decryption": "none"
+            },
+            "streamSettings": {
+                "network": "tcp",
+                "security": "reality",
+                "realitySettings": {
+                    "dest": "www.microsoft.com:443",
+                    "serverNames": [
+                        "www.microsoft.com",
+                        "*.microsoft.com"
+                    ],
+                    "privateKey": "gKFubRNJ7lRLrjI0T5Jz9Q3WvYvL8B5mN2cD1xF4pHk",
+                    "publicKey": "xKvN8mL3pQ5rT7yU9wV1bC3dE5fG7hI9jK1lM3nO5pQ",
+                    "shortIds": [
+                        "0123456789abcdef",
+                        "0123456789abcde0"
+                    ],
+                    "fingerprint": "chrome"
+                }
+            }
+        }
+    ],
+    "outbounds": [
+        {
+            "protocol": "freedom",
+            "tag": "direct"
+        }
+    ],
+    "routing": {
+        "rules": []
+    }
+}
