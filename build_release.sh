@@ -5,7 +5,7 @@
 
 set -e
 
-VERSION="v0.1.26"
+VERSION="v0.1.27"
 PROJECT_NAME="xray-lite"
 
 echo "========================================="
