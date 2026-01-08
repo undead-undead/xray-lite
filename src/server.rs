@@ -8,6 +8,10 @@ use crate::network::ConnectionManager;
 use crate::protocol::vless::{Command, VlessCodec};
 use crate::transport::{RealityServer, XhttpServer};
 
+/// 定义通用的 AsyncStream trait 以支持 TCP 和 TLS 流
+pub trait AsyncStream: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
+impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send> AsyncStream for T {}
+
 /// 代理服务器
 pub struct Server {
     config: Config,
@@ -133,6 +137,10 @@ impl Server {
         }
     }
 
+
+
+// ... existing code ...
+
     /// 处理客户端连接
     async fn handle_client(
         stream: TcpStream,
@@ -140,11 +148,12 @@ impl Server {
         reality_server: Option<RealityServer>,
         connection_manager: ConnectionManager,
     ) -> Result<()> {
-        // 如果启用了 Reality，先处理 TLS 握手
-        let mut stream = if let Some(reality) = reality_server {
-            reality.accept(stream).await?
+        // 如果配置了 Reality，执行握手
+        let mut stream: Box<dyn AsyncStream> = if let Some(reality) = reality_server {
+            let tls_stream = reality.accept(stream).await?;
+            Box::new(tls_stream)
         } else {
-            stream
+            Box::new(stream)
         };
 
         // 读取 VLESS 请求

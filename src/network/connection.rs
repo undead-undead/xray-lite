@@ -1,16 +1,21 @@
 use anyhow::Result;
 use tokio::net::TcpStream;
+use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{debug, error, info};
 
 /// 代理连接
-pub struct ProxyConnection {
-    client_stream: TcpStream,
-    remote_stream: TcpStream,
+pub struct ProxyConnection<C, R> {
+    client_stream: C,
+    remote_stream: R,
 }
 
-impl ProxyConnection {
+impl<C, R> ProxyConnection<C, R> 
+where 
+    C: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    R: AsyncRead + AsyncWrite + Unpin + Send + 'static
+{
     /// 创建新的代理连接
-    pub fn new(client_stream: TcpStream, remote_stream: TcpStream) -> Self {
+    pub fn new(client_stream: C, remote_stream: R) -> Self {
         Self {
             client_stream,
             remote_stream,
@@ -61,11 +66,14 @@ impl ConnectionManager {
     }
 
     /// 处理新连接
-    pub async fn handle_connection(
+    pub async fn handle_connection<T>(
         &self,
-        client_stream: TcpStream,
+        client_stream: T,
         remote_stream: TcpStream,
-    ) -> Result<()> {
+    ) -> Result<()> 
+    where
+        T: AsyncRead + AsyncWrite + Unpin + Send + 'static
+    {
         // 增加活跃连接计数
         self.active_connections
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);

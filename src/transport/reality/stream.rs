@@ -34,6 +34,17 @@ impl<S: AsyncRead + AsyncWrite + Unpin> TlsStream<S> {
         }
     }
 
+    pub fn new_with_buffer(stream: S, keys: TlsKeys, initial_data: BytesMut) -> Self {
+        Self {
+            stream,
+            keys,
+            input_buffer: initial_data, // Use provided buffer
+            decrypted_buffer: BytesMut::with_capacity(16384),
+            read_seq: 0,
+            write_seq: 0,
+        }
+    }
+
     /// 尝试从 input_buffer 解析并解密一条 TLS 记录
     fn process_record(&mut self) -> Result<bool> {
         if self.input_buffer.len() < 5 {
@@ -111,7 +122,14 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncRead for TlsStream<S> {
             }
 
             let dest = this.input_buffer.chunk_mut();
-            let mut read_buf = unsafe { ReadBuf::uninit(dest) };
+            // Safety: converting UninitSlice to &mut [MaybeUninit<u8>] manually
+            let slice = unsafe {
+                std::slice::from_raw_parts_mut(
+                    dest.as_mut_ptr() as *mut std::mem::MaybeUninit<u8>,
+                    dest.len(),
+                )
+            };
+            let mut read_buf = ReadBuf::uninit(slice);
 
             match Pin::new(&mut this.stream).poll_read(cx, &mut read_buf) {
                 Poll::Ready(Ok(())) => {

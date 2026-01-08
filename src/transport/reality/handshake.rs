@@ -19,7 +19,7 @@ impl RealityHandshake {
     }
 
     /// 执行 Reality TLS 握手
-    pub async fn perform(&self, mut client_stream: TcpStream) -> Result<TcpStream> {
+    pub async fn perform(&self, mut client_stream: TcpStream) -> Result<super::stream::TlsStream<TcpStream>> {
         // 1. 读取 ClientHello
         let (client_hello, client_hello_payload) = self.read_client_hello(&mut client_stream).await?;
 
@@ -109,50 +109,78 @@ impl RealityHandshake {
         
         info!("Handshake (Encryption Stage) completed. Waiting for Client Finished...");
 
-        // 11. Read Client Finished
-        // We expect the client to send its Finished message, encrypted with Handshake Keys.
-        let mut buf = BytesMut::with_capacity(2048);
-        let n = client_stream.read_buf(&mut buf).await?;
-        if n == 0 {
-            return Err(anyhow!("Unexpected EOF waiting for Client Finished"));
+        // 11. Read Client Finished (Handling CCS)
+        let mut buf = BytesMut::with_capacity(4096);
+        let mut client_finished_payload = Vec::new();
+        
+        loop {
+            // Ensure header available
+            if buf.len() < 5 {
+                let n = client_stream.read_buf(&mut buf).await?;
+                if n == 0 { return Err(anyhow!("EOF waiting for Client Finished")); }
+                if buf.len() < 5 { continue; }
+            }
+            
+            let content_type = buf[0];
+            let len = u16::from_be_bytes([buf[3], buf[4]]) as usize;
+            
+            if buf.len() < 5 + len {
+                let n = client_stream.read_buf(&mut buf).await?;
+                if n == 0 { return Err(anyhow!("EOF reading record body")); }
+                continue;
+            }
+            
+            // Check Record Type
+            if content_type == 20 { // ChangeCipherSpec
+                debug!("Received CCS (Type 20), skipping");
+                use bytes::Buf;
+                buf.advance(5 + len);
+                continue;
+            }
+            
+            if content_type == 23 { // Application Data
+                // Consume this record from buffer
+                let mut record_data = buf.split_to(5 + len);
+                
+                let mut header = [0u8; 5];
+                header.copy_from_slice(&record_data[..5]);
+                let ciphertext = &mut record_data[5..];
+                
+                // Decrypt (Seq 0)
+                let (ctype, plen) = keys.decrypt_client_record(0, &header, ciphertext)?;
+                
+                if ctype != 22 { // Handshake
+                     return Err(anyhow!("Expected Handshake(22) inside AppData, got {}", ctype));
+                }
+                
+                // Finished Message Found (Type 20)
+                // Verify payload type is Finished(20)? 
+                if plen > 0 && ciphertext[0] == 20 {
+                    client_finished_payload = ciphertext[..plen].to_vec();
+                    debug!("Client Finished received and decrypted.");
+                    break;
+                } else {
+                     return Err(anyhow!("Expected Finished(20) message"));
+                }
+            }
+            
+            return Err(anyhow!("Unexpected ContentType {} during handshake", content_type));
         }
-        
-        if buf.len() < 5 {
-             return Err(anyhow!("Client Finished record too short"));
-        }
-        
-        let mut header = [0u8; 5];
-        header.copy_from_slice(&buf[..5]);
-        let ciphertext = &mut buf[5..];
-        
-        // Decrypt (Seq 0 from Client)
-        let (ctype, len) = keys.decrypt_client_record(0, &header, ciphertext)?;
-        
-        if ctype != 22 { // Handshake Type
-             return Err(anyhow!("Expected Handshake(22) got {}", ctype));
-        }
-        
-        // Note: ciphertext now contains [Finished Msg (Type 20, Len, Data)]
-        // We should theoretically verify the data here using verify_data.
-        // skipping verify for compatibility speedrun.
-        
-        debug!("Client Finished received and decrypted.");
         
         // 12. Derive Application Keys
-        // Hash covers up to and including Client Finished.
-        let client_finished_msg = &ciphertext[..len];
         let transcript3 = vec![
             client_hello_payload.as_slice(), 
             server_hello_msg, 
             &ee_msg,
             &fin_msg, 
-            client_finished_msg
+            &client_finished_payload
         ];
         let hash3 = super::crypto::hash_transcript(&transcript3);
         
         let app_keys = TlsKeys::derive_application_keys(&handshake_secret, &hash3)?;
         
-        Ok(super::stream::TlsStream::new(client_stream, app_keys))
+        // Pass remaining buffer to stream
+        Ok(super::stream::TlsStream::new_with_buffer(client_stream, app_keys, buf))
     }
 
     async fn read_client_hello(&self, stream: &mut TcpStream) -> Result<(ClientHello, Vec<u8>)> {
