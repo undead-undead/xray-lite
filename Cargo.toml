@@ -16,6 +16,8 @@ tokio-util = { version = "0.7", features = ["codec"] }
 rustls = "0.22"
 tokio-rustls = "0.25"
 rustls-pemfile = "2.0"
+# boring = "4.0"  # Removed: requires cmake and C++ compilation
+# tokio-boring = "4.0"
 
 # HTTP/2
 h2 = "0.4"
