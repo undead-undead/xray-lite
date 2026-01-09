@@ -19,7 +19,7 @@ BLUE='\033[0;34m'
 NC='\033[0m'
 
 # Version / 版本
-VERSION="v0.2.8"
+VERSION="v0.2.9-dev-v11"
 REPO="undead-undead/xray-lite"
 
 echo -e "${BLUE}=========================================${NC}"
