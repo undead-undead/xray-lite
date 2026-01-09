@@ -169,7 +169,7 @@ impl RealityServerRustls {
         // Overwrite the signature at the end of DER
         cert_der[sig_pos..].copy_from_slice(sig_bytes);
         
-        std::eprintln!("REALITY_DEBUG: Generated dynamic cert for host {} with AuthKey prefix {:?}", host, &auth_key[..8]);
+        std::eprintln!("REALITY_STDERR: Generated dynamic cert successfully.");
 
         Ok((CertificateDer::from(cert_der), PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(priv_key_der))))
     }
