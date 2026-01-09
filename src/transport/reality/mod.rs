@@ -31,3 +31,4 @@ pub struct RealityConfig {
     /// TLS 指纹类型 (chrome, firefox, safari, etc.)
     pub fingerprint: String,
 }
+pub mod server_rustls;
