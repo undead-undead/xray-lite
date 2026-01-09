@@ -1,24 +1,20 @@
 /// Reality server implementation using rustls-reality
 ///
-/// This implementation provides "Sniff-and-Dispatch" capability:
-/// 1. Peeks at the first packet (ClientHello)
-/// 2. Verifies Reality authentication
-/// 3. If valid: Dispatches to rustls for Reality handshake
-/// 4. If invalid: Fallbacks/Proxies to destination server
+/// This implementation provides "Sniff-and-Dispatch" capability for xray-lite integration.
 
 use std::sync::Arc;
-use anyhow::{Result, anyhow};
-use tokio::net::{TcpListener, TcpStream};
+use anyhow::{Result, anyhow, bail};
+use tokio::net::TcpStream;
 use tokio_rustls::TlsAcceptor;
 use rustls::ServerConfig;
 use rustls::reality::RealityConfig;
-// Imports for rustls v0.22 (used by tokio-rustls 0.25)
-use rustls::server::{ClientHello, ResolvesServerCert};
-use rustls::sign::CertifiedKey;
+// Imports for rustls v0.22
+use rustls_pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use tracing::{info, debug, error, warn};
 
 use super::hello_parser;
 
+#[derive(Clone)]
 pub struct RealityServerRustls {
     acceptor: TlsAcceptor,
     reality_config: Arc<RealityConfig>,
@@ -33,10 +29,27 @@ impl RealityServerRustls {
 
         reality_config.validate()?;
 
+        // Generate a self-signed certificate for the destination
+        // In a real Reality implementation, this should be the "stolen" certificate.
+        // For now, we generate one to allow the TLS handshake to complete.
+        // TODO: Implement certificate stealing/forwarding from dest.
+        
+        let subject_alt_names = vec!["www.microsoft.com".to_string()];
+        let cert = rcgen::generate_simple_self_signed(subject_alt_names)
+            .map_err(|e| anyhow!("Failed to generate self-signed cert: {}", e))?;
+            
+        let cert_der = cert.serialize_der()
+            .map_err(|e| anyhow!("Failed to serialize cert: {}", e))?;
+        let key_der = cert.serialize_private_key_der();
+
+        let certs = vec![CertificateDer::from(cert_der)];
+        let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key_der));
+
         // rustls 0.22 builder pattern
         let config = ServerConfig::builder()
             .with_no_client_auth()
-            .with_cert_resolver(Arc::new(DummyCertResolver));
+            .with_single_cert(certs, key)
+            .map_err(|e| anyhow!("Failed to create ServerConfig: {}", e))?;
 
         let mut config = config;
         config.reality_config = Some(Arc::new(reality_config.clone()));
@@ -49,89 +62,62 @@ impl RealityServerRustls {
         })
     }
 
-    pub fn config(&self) -> &Arc<RealityConfig> {
-        &self.reality_config
-    }
-    
-    pub fn test_inject_auth(&self, server_random: &mut [u8; 32], client_random: &[u8; 32]) -> Result<()> {
-        rustls::reality::inject_auth(server_random, &self.reality_config, client_random)
-            .map_err(|e| anyhow!("Failed to inject Reality auth: {:?}", e))
-    }
-
-    pub async fn run(&self, addr: &str) -> Result<()> {
-        let listener = TcpListener::bind(addr).await?;
-        info!("Reality server listening on {}", addr);
-
-        loop {
-            match listener.accept().await {
-                Ok((stream, peer_addr)) => {
-                    info!("New connection from {}", peer_addr);
-                    let acceptor = self.acceptor.clone();
-                    let config = self.reality_config.clone();
-                    tokio::spawn(async move {
-                        if let Err(e) = Self::handle_connection(stream, acceptor, config).await {
-                            error!("Connection handling failed: {}", e);
-                        }
-                    });
-                }
-                Err(e) => error!("Failed to accept connection: {}", e),
-            }
-        }
-    }
-
-    async fn handle_connection(
-        mut stream: TcpStream, 
-        acceptor: TlsAcceptor, 
-        config: Arc<RealityConfig>
-    ) -> Result<()> {
+    /// Accept a connection.
+    /// Returns Ok(stream) if valid Reality connection.
+    /// Returns Err if connection was rejected or handled via fallback.
+    pub async fn accept(&self, mut stream: TcpStream) -> Result<tokio_rustls::server::TlsStream<TcpStream>> {
         let mut buf = vec![0u8; 1024];
         let n = stream.peek(&mut buf).await?;
-        if n == 0 { return Ok(()); }
+        if n == 0 {
+            bail!("Connection closed during peek");
+        }
         
-        // Try parsing only what we have peeked
         let peek_slice = &buf[..n];
         let should_fallback = match hello_parser::parse_client_hello(peek_slice) {
-            Ok(Some(info)) => !rustls::reality::verify_client(&info.session_id, &info.client_random, &config),
+            Ok(Some(info)) => !rustls::reality::verify_client(&info.session_id, &info.client_random, &self.reality_config),
             Ok(None) => true, // Not ClientHello
             Err(_) => true // Parse error
         };
 
         if should_fallback {
-            info!("Non-Reality client detected ({}), falling back", stream.peer_addr().unwrap());
-            Self::fallback(stream, &config.dest.as_ref().unwrap()).await?;
-        } else {
-            info!("Reality client detected ({}), proceeding with handshake", stream.peer_addr().unwrap());
-            match acceptor.accept(stream).await {
-                Ok(_tls_stream) => {
-                    info!("Reality handshake successful");
-                    // TODO: Handle VLESS
-                }
-                Err(e) => {
-                    error!("Reality handshake error: {}", e);
-                }
+            let dest = self.reality_config.dest.as_ref().unwrap();
+            info!("Non-Reality client detected, falling back to {}", dest);
+            
+            // Execute fallback
+            // This will block until the fallback connection is finished/closed
+            if let Err(e) = self.fallback(stream, dest).await {
+                warn!("Fallback error: {}", e);
             }
+            
+            // Return error indicating this connection is handled/not for VLESS
+            bail!("Reality fallback handled");
+        } else {
+            info!("Reality client detected, proceeding with handshake");
+            // Pass to rustls
+            let tls_stream = self.acceptor.accept(stream).await?;
+            info!("Reality handshake successful");
+            Ok(tls_stream)
         }
-        Ok(())
     }
 
-    async fn fallback(mut stream: TcpStream, dest_addr: &str) -> Result<()> {
+    async fn fallback(&self, mut stream: TcpStream, dest_addr: &str) -> Result<()> {
         let mut dest_stream = TcpStream::connect(dest_addr).await?;
+        let _ = stream.set_nodelay(true);
+        let _ = dest_stream.set_nodelay(true);
+
         let (mut client_read, mut client_write) = stream.split();
         let (mut dest_read, mut dest_write) = dest_stream.split();
+        
         let client_to_dest = tokio::io::copy(&mut client_read, &mut dest_write);
         let dest_to_client = tokio::io::copy(&mut dest_read, &mut client_write);
+        
         let _ = tokio::try_join!(client_to_dest, dest_to_client);
         Ok(())
     }
-}
-
-#[derive(Debug)]
-struct DummyCertResolver;
-impl ResolvesServerCert for DummyCertResolver {
-    fn resolve(
-        &self,
-        _client_hello: ClientHello,
-    ) -> Option<Arc<CertifiedKey>> {
-        None
+    
+    // Test helper
+    pub fn test_inject_auth(&self, server_random: &mut [u8; 32], client_random: &[u8; 32]) -> Result<()> {
+        rustls::reality::inject_auth(server_random, &self.reality_config, client_random)
+            .map_err(|e| anyhow!("Failed to inject Reality auth: {:?}", e))
     }
 }

@@ -1,14 +1,15 @@
 use anyhow::{anyhow, Result};
 use tokio::net::TcpStream;
 use tracing::{debug, info};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 
-use super::{RealityConfig, RealityHandshake};
+use super::RealityConfig;
+use super::server_rustls::RealityServerRustls;
 
-/// Reality 服务器
+/// Reality 服务器 (Wrapper around RealityServerRustls)
 #[derive(Clone)]
 pub struct RealityServer {
-    config: RealityConfig,
-    handshake: RealityHandshake,
+    inner: RealityServerRustls,
 }
 
 impl RealityServer {
@@ -19,30 +20,31 @@ impl RealityServer {
             return Err(anyhow!("Reality dest 不能为空"));
         }
 
-        if config.server_names.is_empty() {
-            return Err(anyhow!("Reality serverNames 不能为空"));
-        }
-
         if config.private_key.is_empty() {
             return Err(anyhow!("Reality privateKey 不能为空"));
         }
 
-        info!("Reality 服务器初始化成功");
+        // 解码 private_key (Base64)
+        let private_key_bytes = BASE64.decode(&config.private_key)
+            .map_err(|e| anyhow!("Failed to decode Reality private key: {}", e))?;
+
+        if private_key_bytes.len() != 32 {
+            return Err(anyhow!("Reality privateKey must be 32 bytes (got {})", private_key_bytes.len()));
+        }
+
+        info!("Reality 服务器初始化成功 (Rustls backend)");
         debug!("目标: {}", config.dest);
-        debug!("服务器名称: {:?}", config.server_names);
         debug!("指纹: {}", config.fingerprint);
 
-        let handshake = RealityHandshake::new(config.clone());
+        let inner = RealityServerRustls::new(private_key_bytes, Some(config.dest.clone()))?;
 
-        Ok(Self { config, handshake })
+        Ok(Self { inner })
     }
 
     /// 处理传入的 TLS 连接
-    pub async fn accept(&self, stream: TcpStream) -> Result<super::stream::TlsStream<TcpStream>> {
-        debug!("接收到新的 Reality 连接");
-
-        // 使用 RealityHandshake 执行完整的 TLS 握手
-        self.handshake.perform(stream).await
+    pub async fn accept(&self, stream: TcpStream) -> Result<tokio_rustls::server::TlsStream<TcpStream>> {
+        // 使用 Sniff-and-Dispatch 逻辑
+        self.inner.accept(stream).await
     }
 }
 
@@ -53,9 +55,10 @@ mod tests {
     fn create_test_config() -> RealityConfig {
         RealityConfig {
             dest: "www.apple.com:443".to_string(),
-            server_names: vec!["www.apple.com".to_string(), "*.apple.com".to_string()],
-            private_key: "test_private_key_32_bytes_long!".to_string(),
-            public_key: Some("test_public_key".to_string()),
+            server_names: vec!["www.apple.com".to_string()],
+            // 32 bytes of 'A' in base64
+            private_key: "QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE=".to_string(),
+            public_key: None,
             short_ids: vec!["0123456789abcdef".to_string()],
             fingerprint: "chrome".to_string(),
         }
