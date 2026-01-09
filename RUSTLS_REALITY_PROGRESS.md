@@ -165,3 +165,33 @@ rustls-reality/
 - XTLS/REALITY：https://github.com/XTLS/REALITY
 - 实施计划：`RUSTLS_REALITY_IMPLEMENTATION_PLAN.md`
 - 技术细节：`RUSTLS_REALITY_TECHNICAL_PLAN.md`
+
+## 更新（2026-01-09 11:00）
+
+### ✅ 阶段 2 完成！
+
+**提交**：`0e3c0403` - Phase 2 complete: Add Reality configuration and proper HMAC implementation
+
+**成就**：
+1. ✅ 添加 `reality_config` 字段到 `ServerConfig`
+2. ✅ 实现 `RealityConfig` 结构体（包含验证）
+3. ✅ 使用 `ring` crate 实现正确的 HMAC-SHA256
+4. ✅ 实现 `inject_auth` 函数（符合 XTLS/REALITY 算法）
+5. ✅ 实现 `verify_client` 函数（占位符）
+6. ✅ **所有 7 个单元测试通过**
+
+**测试结果**：
+```
+running 7 tests
+test reality::tests::test_config_validation ... ok
+test reality::tests::test_hmac_correctness ... ok
+test reality::tests::test_inject_auth ... ok
+test reality::tests::test_inject_auth_invalid_key_length ... ok
+test reality::tests::test_verify_client ... ok
+test reality::tests::test_verify_client_empty_session_id ... ok
+test reality::tests::test_verify_client_invalid_key ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured
+```
+
+**下一步**：集成到 TLS 1.3 握手流程
