@@ -21,13 +21,6 @@ impl Address {
         }
 
         let addr_type = buf.get_u8();
-        eprintln!(
-            "🔍 Address decode: addr_type byte = 0x{:02x} ({}), remaining = {}",
-            addr_type,
-            addr_type,
-            buf.remaining()
-        );
-
         match addr_type {
             // IPv4
             0x01 => {
@@ -65,24 +58,15 @@ impl Address {
             }
             // Mux 标记 - v2ray/小火箭的多路复用
             0x00 => {
-                eprintln!("🔀 Mux connection detected!");
-
                 // Mux 格式: 0x00 + SessionID(1字节) + 真实地址
                 if buf.remaining() < 1 {
                     return Err(anyhow!("缓冲区太小，无法读取 Mux Session ID"));
                 }
 
-                let session_id = buf.get_u8();
-                eprintln!("   -> Mux Session ID: {}", session_id);
-                eprintln!(
-                    "   -> Remaining bytes after session ID: {}",
-                    buf.remaining()
-                );
+                let _session_id = buf.get_u8(); // 必须读取并跳过
 
                 // 递归解析真实地址
                 let real_address = Self::decode(buf)?;
-                eprintln!("   -> Parsed real address: {}", real_address.to_string());
-
                 Ok(real_address)
             }
             _ => Err(anyhow!("未知的地址类型: {}", addr_type)),

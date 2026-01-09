@@ -195,16 +195,13 @@ impl Server {
                 
                 if is_http_probe {
                     // 这是 HTTP 探测请求，返回 204 响应
-                    info!("🔍 检测到 HTTP 探测请求（{}字节），静默响应 204", buf.len());
                     use tokio::io::AsyncWriteExt;
                     let _ = stream.write_all(b"HTTP/1.1 204 No Content\r\n\r\n").await;
                     return Ok(());
                 }
                 
-                // 真正的 VLESS 解码错误才记录详细日志
-                let bytes_read = buf.len();
-                let hex_dump = hex::encode(&buf[..bytes_read.min(128)]);
-                error!("❌ VLESS 解码失败: {}. Bytes: {} Hex: {}", e, bytes_read, hex_dump);
+                // 真正的 VLESS 解码错误
+                error!("VLESS 解码失败: {}", e);
                 return Err(e);
             }
         };

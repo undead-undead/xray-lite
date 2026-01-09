@@ -54,10 +54,6 @@ impl VlessRequest {
 
         // 读取版本
         let version = buf.get_u8();
-        eprintln!(
-            "🔍 VLESS decode step 1: version byte = 0x{:02x} ({})",
-            version, version
-        );
         if version != VLESS_VERSION {
             return Err(anyhow!("不支持的 VLESS 版本: {}", version));
         }
@@ -74,7 +70,6 @@ impl VlessRequest {
 
         // 读取附加数据长度
         let addon_length = buf.get_u8();
-        eprintln!("🔍 VLESS decode step 3: addon_length = {}", addon_length);
 
         // 跳过附加数据
         if buf.remaining() < addon_length as usize {
@@ -86,15 +81,9 @@ impl VlessRequest {
         if buf.remaining() < 1 {
             return Err(anyhow!("缓冲区太小，无法读取命令"));
         }
-        let cmd_byte = buf.get_u8();
-        eprintln!("🔍 VLESS decode step 4: command byte = 0x{:02x}", cmd_byte);
-        let command = Command::from_u8(cmd_byte)?;
+        let command = Command::from_u8(buf.get_u8())?;
 
         // 读取目标地址
-        eprintln!(
-            "🔍 VLESS decode step 5: starting address decode, remaining bytes = {}",
-            buf.remaining()
-        );
         let address = Address::decode(buf)?;
 
         Ok(VlessRequest {
