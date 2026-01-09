@@ -227,40 +227,70 @@ impl Server {
                 let mut initial_data = Vec::new();
 
                 // --- 🌟 SNIFFING START ---
-                // 尝试预读取数据以嗅探 SNI
-                let mut buf = vec![0u8; 4096];
-                
-                // 使用 timeout 防止阻塞 (延长到 2秒 以适应高延迟网络)
-                match tokio::time::timeout(std::time::Duration::from_millis(2000), stream.read(&mut buf)).await {
-                    Ok(Ok(n)) => {
-                        if n > 0 {
-                            // 成功读取到了数据
-                            initial_data.extend_from_slice(&buf[..n]);
-                            
-                            // 尝试嗅探
-                            if let Some(sni) = crate::protocol::sniffer::sniff_tls_sni(&initial_data) {
-                                // 提取端口 (手动匹配 Address 枚举)
-                                let port = match &request.address {
-                                    crate::protocol::vless::Address::Ipv4(_, p) => *p,
-                                    crate::protocol::vless::Address::Domain(_, p) => *p,
-                                    crate::protocol::vless::Address::Ipv6(_, p) => *p,
-                                };
-                                
-                                info!("🕵️ Sniffed domain: {} (Override original: {})", sni, target_address);
-                                target_address = format!("{}:{}", sni, port);
+                // 1. 先检查之前的缓冲区是否有剩余数据 (Header 和 Payload 一起发过来的情况)
+                if !buf.is_empty() {
+                    initial_data.extend_from_slice(&buf);
+                    // buf 中的数据已经被转移到 initial_data，清空 buf 以免重复发送?
+                    // 注意：这里的 buf 是 bytes::BytesMut。 VlessCodec 应该已经 advance 了 Header 部分。
+                    // 剩下的就是 Payload。
+                    buf.clear(); 
+                }
+
+                // 2. 如果数据不够嗅探 (或为空)，再尝试从 stream 读取
+                // 即使有数据，如果 ClientHello 被分包了，也可能不够。TLS ClientHello 至少几十字节。
+                // 如果 initial_data 为空，肯定要读。如果不为空但很短，也可以尝试读更多(带超时)。
+                if initial_data.len() < 256 { // 256 是个经验值，ClientHello 通常大于这个
+                    let mut sniff_buf = vec![0u8; 4096];
+                    
+                    // 使用 timeout 防止阻塞 (3秒)
+                    // 如果 initial_data 已有数据，我们只读更短时间？或者依然读？
+                    // 简单起见，尝试读一次。
+                    let timeout_dur = if initial_data.is_empty() { 
+                        std::time::Duration::from_millis(3000) 
+                    } else {
+                        // 如果已有部分数据，等待后续数据的时间可以短一点
+                        std::time::Duration::from_millis(500)
+                    };
+
+                    match tokio::time::timeout(timeout_dur, stream.read(&mut sniff_buf)).await {
+                        Ok(Ok(n)) => {
+                            if n > 0 {
+                                initial_data.extend_from_slice(&sniff_buf[..n]);
+                            }
+                        },
+                        Ok(Err(e)) => {
+                            error!("Failed to sniff initial data: {}", e);
+                            return Err(e.into());
+                        },
+                        Err(_) => {
+                            // Timeout
+                            if initial_data.is_empty() {
+                                debug!("Sniffing timed out (empty data), proceeding with original address");
                             } else {
-                                debug!("No SNI found in initial data ({} bytes)", n);
+                                // 已经有部分数据了，就不算完全超时
                             }
                         }
-                    },
-                    Ok(Err(e)) => {
-                        error!("Failed to sniff initial data: {}", e);
-                        return Err(e.into());
-                    },
-                    Err(_) => {
-                        debug!("Sniffing timed out, proceeding with original address");
                     }
                 }
+
+                // 3. 尝试嗅探
+                if !initial_data.is_empty() {
+                     if let Some(sni) = crate::protocol::sniffer::sniff_tls_sni(&initial_data) {
+                        // 提取端口 (手动匹配 Address 枚举)
+                        let port = match &request.address {
+                            crate::protocol::vless::Address::Ipv4(_, p) => *p,
+                            crate::protocol::vless::Address::Domain(_, p) => *p,
+                            crate::protocol::vless::Address::Ipv6(_, p) => *p,
+                        };
+                        
+                        info!("🕵️ Sniffed domain: {} (Override original: {})", sni, target_address);
+                        target_address = format!("{}:{}", sni, port);
+                    } else {
+                        // 只有在数据足够长时才认为是 "No SNI found"，否则可能是太短
+                        debug!("No SNI found in initial data ({} bytes)", initial_data.len());
+                    }
+                }
+                // --- 🌟 SNIFFING END ---
                 // --- 🌟 SNIFFING END ---
 
                 // 连接到目标服务器 (可能是原来的 IP，也可能是嗅探到的域名)
