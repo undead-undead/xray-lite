@@ -43,7 +43,7 @@ impl RealityServer {
     }
 
     /// 处理传入的 TLS 连接
-    pub async fn accept(&self, stream: TcpStream) -> Result<tokio_rustls::server::TlsStream<TcpStream>> {
+    pub async fn accept(&self, stream: TcpStream) -> Result<tokio_rustls::server::TlsStream<super::server_rustls::PrefixedStream<TcpStream>>> {
         // 使用 Sniff-and-Dispatch 逻辑
         self.inner.accept(stream).await
     }
