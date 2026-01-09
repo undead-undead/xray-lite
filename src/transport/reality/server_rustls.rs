@@ -14,24 +14,18 @@ use hkdf::Hkdf;
 use sha2::Sha256;
 use aes_gcm::{Aes256Gcm, KeyInit, AeadInPlace, Nonce};
 use bytes::Buf;
+use ring::hmac;
 
 use super::hello_parser::{self, ClientHelloInfo};
 
 pub struct RealityServerRustls {
     reality_config: Arc<RealityConfig>,
-    certs: Vec<CertificateDer<'static>>,
-    key: PrivateKeyDer<'static>,
 }
 
 impl Clone for RealityServerRustls {
     fn clone(&self) -> Self {
         Self {
             reality_config: Arc::clone(&self.reality_config),
-            certs: self.certs.clone(),
-            key: match &self.key {
-                PrivateKeyDer::Pkcs8(p) => PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(p.secret_pkcs8_der().to_vec())),
-                _ => panic!("Unsupported key type"),
-            },
         }
     }
 }
@@ -51,18 +45,8 @@ impl RealityServerRustls {
 
         reality_config.validate().map_err(|e| anyhow!("Reality config validation failed: {:?}", e))?;
 
-        let dest_str = reality_config.dest.as_deref().unwrap_or("www.microsoft.com");
-        let dest_host = dest_str.split(':').next().unwrap_or("www.microsoft.com");
-        let cert = rcgen::generate_simple_self_signed(vec![dest_host.to_string()])
-            .map_err(|e| anyhow!("Failed to generate self-signed cert: {}", e))?;
-        
-        let certs = vec![CertificateDer::from(cert.serialize_der().map_err(|e| anyhow!("Cert serialization fail: {}", e))?)];
-        let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(cert.serialize_private_key_der()));
-
         Ok(Self { 
             reality_config: Arc::new(reality_config),
-            certs,
-            key,
         })
     }
 
@@ -85,16 +69,19 @@ impl RealityServerRustls {
 
         if let Ok(Some(info)) = hello_parser::parse_client_hello(&buffer) {
             if let Some((offset, auth_key)) = self.verify_client_reality(&info, &buffer) {
-                debug!("Reality: Derived AuthKey[0..4]: {:02x?}", &auth_key[0..4]);
-                info!("Reality: Verified client (Offset {}), using session AuthKey for ServerHello signature", offset);
+                info!("Reality: Verified client (Offset {}), generating dynamic signature-certificate", offset);
                 
+                let dest_str = self.reality_config.dest.as_deref().unwrap_or("www.microsoft.com");
+                let dest_host = dest_str.split(':').next().unwrap_or("www.microsoft.com");
+                let (cert, key) = self.generate_reality_cert(&auth_key, dest_host)?;
+
                 let mut conn_reality_config = (*self.reality_config).clone();
                 conn_reality_config.private_key = auth_key.to_vec();
                 conn_reality_config.verify_client = false; 
 
                 let mut config = ServerConfig::builder()
                     .with_no_client_auth()
-                    .with_single_cert(self.certs.clone(), self.key.clone_key())
+                    .with_single_cert(vec![cert], key)
                     .map_err(|e| anyhow!("Config build fail: {}", e))?;
                 config.reality_config = Some(Arc::new(conn_reality_config));
 
@@ -152,6 +139,37 @@ impl RealityServerRustls {
             if sid == &buf[8..16] { return Some((8, auth_key)); }
         }
         None
+    }
+
+    fn generate_reality_cert(&self, auth_key: &[u8; 32], host: &str) -> Result<(CertificateDer<'static>, PrivateKeyDer<'static>)> {
+        use rcgen::{CertificateParams, KeyPair, PKCS_ED25519};
+
+        let key_pair = KeyPair::generate(&PKCS_ED25519).map_err(|e| anyhow!("Key generation fail: {}", e))?;
+        let mut params = CertificateParams::new(vec![host.to_string()]);
+        params.alg = &PKCS_ED25519;
+        params.key_pair = Some(key_pair);
+        
+        let cert = rcgen::Certificate::from_params(params).map_err(|e| anyhow!("Cert generation fail: {}", e))?;
+        let mut cert_der = cert.serialize_der().map_err(|e| anyhow!("Cert serialization fail: {}", e))?;
+        let priv_key_der = cert.serialize_private_key_der();
+        
+        let pub_key_raw = if let Some(pos) = cert_der.windows(3).position(|w| w == &[0x03, 0x21, 0x00]) {
+            &cert_der[pos+3..pos+35]
+        } else {
+            bail!("Could not find public key in cert DER");
+        };
+
+        let ring_key = hmac::Key::new(hmac::HMAC_SHA512, auth_key);
+        let signature = hmac::sign(&ring_key, pub_key_raw);
+        let sig_bytes = signature.as_ref(); 
+
+        if let Some(pos) = cert_der.windows(3).rposition(|w| w == &[0x03, 0x41, 0x00]) {
+            cert_der[pos+3..pos+67].copy_from_slice(sig_bytes);
+        } else {
+             bail!("Could not find signature BIT STRING in cert DER");
+        }
+
+        Ok((CertificateDer::from(cert_der), PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(priv_key_der))))
     }
 
     async fn fallback(&self, mut stream: TcpStream, prefix: &[u8], dest: &str) -> Result<()> {
