@@ -63,6 +63,32 @@ impl Address {
                 let port = buf.get_u16();
                 Ok(Address::Ipv6(Ipv6Addr::from(octets), port))
             }
+            // 未知类型 - 可能是 v2ray 扩展或 padding
+            0x00 => {
+                let peek_len = buf.remaining().min(64);
+                let peek_bytes = hex::encode(&buf[..peek_len]);
+                eprintln!(
+                    "⚠️ Address type 0x00 detected! Following {} bytes: {}",
+                    peek_len, peek_bytes
+                );
+
+                // 尝试作为域名解析（可能是隐藏的域名类型）
+                if buf.remaining() >= 1 {
+                    let len = buf.get_u8() as usize;
+                    eprintln!("   -> Next byte (potential domain length): {}", len);
+
+                    if buf.remaining() >= len + 2 && len > 0 && len < 256 {
+                        let domain_bytes = buf.copy_to_bytes(len);
+                        if let Ok(domain) = String::from_utf8(domain_bytes.to_vec()) {
+                            let port = buf.get_u16();
+                            eprintln!("   -> Parsed as domain: {}:{}", domain, port);
+                            return Ok(Address::Domain(domain, port));
+                        }
+                    }
+                }
+
+                return Err(anyhow!("未知的地址类型: 0 (可能是v2ray扩展字段)"));
+            }
             _ => Err(anyhow!("未知的地址类型: {}", addr_type)),
         }
     }
