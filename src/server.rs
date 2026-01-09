@@ -169,8 +169,17 @@ impl Server {
         let request = match codec.decode_request(&mut buf) {
             Ok(req) => req,
             Err(e) => {
+                // 检查是否是 HTTP 探测请求（常见于 Passwall 等客户端）
+                if buf.len() > 4 && (buf[0..4] == *b"GET " || buf[0..4] == *b"HEAD" || buf[0..4] == *b"POST") {
+                    // 这是 HTTP 探测请求，静默返回，避免误报
+                    use tokio::io::AsyncWriteExt;
+                    let _ = stream.write_all(b"HTTP/1.1 204 No Content\r\n\r\n").await;
+                    return Ok(());
+                }
+                
+                // 真正的 VLESS 解码错误才记录详细日志
                 let bytes_read = buf.len();
-                let hex_dump = hex::encode(&buf);
+                let hex_dump = hex::encode(&buf[..bytes_read.min(128)]);
                 error!("VLESS 解码失败: {}. Bytes: {} Hex: {}", e, bytes_read, hex_dump);
                 return Err(e);
             }
