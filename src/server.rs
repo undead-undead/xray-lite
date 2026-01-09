@@ -169,9 +169,14 @@ impl Server {
         let request = match codec.decode_request(&mut buf) {
             Ok(req) => req,
             Err(e) => {
-                // 检查是否是 HTTP 探测请求（常见于 Passwall 等客户端）
-                if buf.len() > 4 && (buf[0..4] == *b"GET " || buf[0..4] == *b"HEAD" || buf[0..4] == *b"POST") {
-                    // 这是 HTTP 探测请求，静默返回，避免误报
+                // 检查是否是 HTTP 探测请求（Passwall 会在前面加协议头，所以不在开头）
+                let buf_slice = &buf[..];
+                let is_http_probe = buf_slice.windows(4).any(|w| 
+                    w == b"GET " || w == b"POST"
+                ) || buf_slice.windows(4).any(|w| w == b"HEAD");
+                
+                if is_http_probe {
+                    // 这是 HTTP 探测请求，返回 204 响应
                     use tokio::io::AsyncWriteExt;
                     let _ = stream.write_all(b"HTTP/1.1 204 No Content\r\n\r\n").await;
                     return Ok(());
