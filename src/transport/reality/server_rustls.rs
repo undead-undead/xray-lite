@@ -128,6 +128,8 @@ impl RealityServerRustls {
         let client_pub: [u8; 32] = info.public_key.as_ref()?.as_slice().try_into().ok()?;
         
         let shared = StaticSecret::from(server_priv).diffie_hellman(&X25519PublicKey::from(client_pub));
+        
+        // HKDF Salt: Standard Reality uses ClientHello.Random[:20]
         let hk = Hkdf::<Sha256>::new(Some(&info.client_random[0..20]), shared.as_bytes());
         let mut auth_key = [0u8; 32];
         if hk.expand(b"REALITY", &mut auth_key).is_err() { return None; }
