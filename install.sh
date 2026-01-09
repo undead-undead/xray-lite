@@ -19,7 +19,7 @@ BLUE='\033[0;34m'
 NC='\033[0m'
 
 # Version / 版本
-VERSION="v0.2.29-final-fix"
+VERSION="v0.2.30-cache-buster"
 REPO="undead-undead/xray-lite"
 
 echo -e "${BLUE}=========================================${NC}"
@@ -79,9 +79,9 @@ echo ""
 echo -e "${YELLOW}[2/6] Downloading Xray-Lite binary... / 下载 Xray-Lite 二进制文件...${NC}"
 
 DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${VERSION}/xray-lite-${BINARY_ARCH}-unknown-linux-gnu.tar.gz"
-FALLBACK_URL="https://raw.githubusercontent.com/${REPO}/main/xray-lite-${BINARY_ARCH}-unknown-linux-gnu.tar.gz"
-# Fallback to release_artifacts in main repo if root raw failed
-FALLBACK_RA_URL="https://raw.githubusercontent.com/${REPO}/main/release_artifacts/xray-lite-${BINARY_ARCH}-unknown-linux-gnu.tar.gz"
+FALLBACK_URL="https://raw.githubusercontent.com/${REPO}/main/xray-lite-${BINARY_ARCH}-unknown-linux-gnu.tar.gz?t=$(date +%s)"
+# Fallback to release_artifacts in main repo if root raw failed; use timestamp to bust cache
+FALLBACK_RA_URL="https://raw.githubusercontent.com/${REPO}/main/release_artifacts/xray-lite-${BINARY_ARCH}-unknown-linux-gnu.tar.gz?t=$(date +%s)"
 
 download_file() {
     local url=$1
