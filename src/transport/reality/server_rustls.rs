@@ -190,6 +190,12 @@ impl RealityServerRustls {
         tokio::io::copy_bidirectional(&mut stream, &mut dest_stream).await?;
         Ok(())
     }
+
+    /// For testing: manually inject authentication into server random
+    pub fn test_inject_auth(&self, server_random: &mut [u8; 32], client_random: &[u8; 32]) -> Result<()> {
+        rustls::reality::inject_auth(server_random, &self.reality_config, client_random)
+            .map_err(|e| anyhow!("Inject failure: {:?}", e))
+    }
 }
 
 /// A stream wrapper that replays a prefix then delegates to inner stream
