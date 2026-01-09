@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Result};
 use tokio::net::TcpStream;
 use tracing::{debug, info};
-use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+use base64::{Engine as _, engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD}};
 
 use super::RealityConfig;
 use super::server_rustls::RealityServerRustls;
@@ -24,8 +24,9 @@ impl RealityServer {
             return Err(anyhow!("Reality privateKey 不能为空"));
         }
 
-        // 解码 private_key (Base64)
-        let private_key_bytes = BASE64.decode(&config.private_key)
+        // 解码 private_key (支持 URL-Safe No Padding 和 Standard)
+        let private_key_bytes = URL_SAFE_NO_PAD.decode(&config.private_key)
+            .or_else(|_| STANDARD.decode(&config.private_key))
             .map_err(|e| anyhow!("Failed to decode Reality private key: {}", e))?;
 
         if private_key_bytes.len() != 32 {
