@@ -88,45 +88,47 @@ impl RealityServerRustls {
              buffer.extend_from_slice(&chunk[..n]);
         }
 
-        let full_client_hello = &buffer;
-        let parse_result = hello_parser::parse_client_hello(full_client_hello);
+        let mut final_buffer = buffer;
+        let parse_result = hello_parser::parse_client_hello(&final_buffer);
 
-        let mut matched_offset = None;
         if let Ok(Some(ref info)) = parse_result {
-            matched_offset = self.verify_client_reality(info, full_client_hello);
-        }
-
-        if let Some(offset) = matched_offset {
-            let mut final_buffer = buffer;
-            if offset == 8 {
-                debug!("Reality: Re-aligning offset 8 client to offset 4 for library compatibility");
-                if let Ok(Some(info)) = hello_parser::parse_client_hello(&final_buffer) {
-                    if let Some(decrypted) = self.decrypt_session_id(&info, &final_buffer) {
-                        let mut new_plain = vec![0u8; 32];
-                        new_plain[0..12].copy_from_slice(&decrypted[8..20]);
-                        if let Some(new_cipher) = self.encrypt_session_id(&info, &final_buffer, &new_plain) {
-                            let sid_hex = hex::encode(&info.session_id);
-                            let buf_hex = hex::encode(&final_buffer);
-                            if let Some(pos_char) = buf_hex.find(&sid_hex) {
-                                let pos = pos_char / 2;
-                                final_buffer[pos..pos+32].copy_from_slice(&new_cipher);
-                                debug!("Reality: Payload realigned successfully");
+            if let Some(offset) = self.verify_client_reality(info, &final_buffer) {
+                // Reality client verified!
+                if offset == 8 {
+                    debug!("Reality: Re-aligning offset 8 client to offset 4 for library compatibility");
+                    if let Some(decrypted) = self.decrypt_session_id(info, &final_buffer) {
+                        if decrypted.len() >= 16 {
+                            // Struct: [Constant(4) | Timestamp(4) | ShortId(8)] -> 16 bytes
+                            // Target: [Timestamp(4) | ShortId(8) | Constant(4)] -> 16 bytes
+                            let mut new_plain = vec![0u8; 16];
+                            new_plain[0..12].copy_from_slice(&decrypted[4..16]); // Copy [Timestamp|ShortID]
+                            new_plain[12..16].copy_from_slice(&decrypted[0..4]);  // Copy Constant to tail
+                            
+                            if let Some(new_cipher) = self.encrypt_session_id(info, &final_buffer, &new_plain) {
+                                let sid_hex = hex::encode(&info.session_id);
+                                let buf_hex = hex::encode(&final_buffer);
+                                if let Some(pos_char) = buf_hex.find(&sid_hex) {
+                                    let pos = pos_char / 2;
+                                    final_buffer[pos..pos+32].copy_from_slice(&new_cipher);
+                                    debug!("Reality: Payload realigned successfully");
+                                }
                             }
                         }
                     }
                 }
-            }
 
-            let prefixed = PrefixedStream::new(final_buffer, stream);
-            let tls_stream = self.acceptor.accept(prefixed).await?;
-            info!("Reality handshake successful");
-            Ok(tls_stream)
-        } else {
-            let dest = self.reality_config.dest.as_deref().unwrap_or("www.microsoft.com:443");
-            info!("Non-Reality client detected from {}, falling back...", stream.peer_addr().map(|a| a.to_string()).unwrap_or_default());
-            self.fallback(stream, &buffer, dest).await?;
-            bail!("Reality fallback handled");
+                let prefixed = PrefixedStream::new(final_buffer, stream);
+                let tls_stream = self.acceptor.accept(prefixed).await?;
+                info!("Reality handshake successful");
+                return Ok(tls_stream);
+            }
         }
+
+        // Fallback for non-reality
+        let dest = self.reality_config.dest.as_deref().unwrap_or("www.microsoft.com:443");
+        info!("Non-Reality client detected from {}, falling back...", stream.peer_addr().map(|a| a.to_string()).unwrap_or_default());
+        self.fallback(stream, &final_buffer, dest).await?;
+        bail!("Reality fallback handled");
     }
 
     /// Decrypts SessionID from ClientHello
@@ -183,8 +185,8 @@ impl RealityServerRustls {
         }
 
         let mut buffer = plaintext.to_vec();
-        while buffer.len() < 32 { buffer.push(0); }
-        if buffer.len() > 32 { buffer.truncate(32); }
+        while buffer.len() < 16 { buffer.push(0); }
+        if buffer.len() > 16 { buffer.truncate(16); }
         
         cipher.encrypt_in_place(nonce, &aad_buffer, &mut buffer).ok()?;
         let mut res = [0u8; 32];
