@@ -301,6 +301,7 @@ Wants=network.target
 Type=simple
 User=root
 Group=root
+Environment=RUST_LOG=debug
 WorkingDirectory=$INSTALL_DIR
 ExecStart=$INSTALL_DIR/vless-server --config $INSTALL_DIR/config.json
 Restart=on-failure

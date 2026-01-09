@@ -163,9 +163,18 @@ impl RealityServerRustls {
         // 1. SessionID check (Ciphertext)
         if info.session_id.len() != 32 { return false; }
         
+        // DEBUG: Log handshake for offset verification
+        debug!("Reality Debug: full_client_hello len: {}", full_client_hello.len());
+        debug!("Reality Debug: full_client_hello (start): {}", hex::encode(&full_client_hello[..std::cmp::min(100, full_client_hello.len())]));
+        debug!("Reality Debug: extracted session_id: {}", hex::encode(&info.session_id));
+        debug!("Reality Debug: extracted client_random: {}", hex::encode(&info.client_random));
+
         let client_pub_key_bytes = match &info.public_key {
             Some(pk) => pk,
-            None => return false,
+            None => {
+                warn!("Reality verification failed: No X25519 Public Key found in ClientHello");
+                return false;
+            },
         };
 
         if client_pub_key_bytes.len() != 32 { return false; }
@@ -181,48 +190,68 @@ impl RealityServerRustls {
         let client_public = X25519PublicKey::from(client_pub_bytes);
 
         let shared_secret = server_secret.diffie_hellman(&client_public);
+        debug!("Reality Debug: shared_secret: {}", hex::encode(shared_secret.as_bytes()));
         
         // 3. HKDF (SHA256)
         // Correct Reality logic: Salt is first 20 bytes of Random
+        let salt = &info.client_random[0..20];
         let hk = Hkdf::<Sha256>::new(
-            Some(&info.client_random[0..20]), // Salt = Random[0..20]
+            Some(salt), // Salt = Random[0..20]
             shared_secret.as_bytes()         // IKM = Shared Secret
         );
         let mut auth_key = [0u8; 32]; // Reality uses AES-256 (32 bytes key)
         if hk.expand(b"REALITY", &mut auth_key).is_err() { return false; }
+        debug!("Reality Debug: auth_key: {}", hex::encode(auth_key));
 
         // 4. AEAD Decrypt (AES-256-GCM)
         let key = aes_gcm::Key::<aes_gcm::Aes256Gcm>::from_slice(&auth_key);
         let cipher = aes_gcm::Aes256Gcm::new(key);
-        let nonce = Nonce::from_slice(&info.client_random[20..32]); // Nonce = Random[20..32] (12 bytes)
+        let nonce_bytes = &info.client_random[20..32];
+        let nonce = Nonce::from_slice(nonce_bytes); // Nonce = Random[20..32] (12 bytes)
+        debug!("Reality Debug: salt: {}, nonce: {}", hex::encode(salt), hex::encode(nonce_bytes));
 
+        // 5. AAD Construction
         // AAD Strategy: Reality uses the Handshake message (excluding Record Header)
         // CRITICAL: Xray-core zeroes out the SessionID field (the ciphertext) in the AAD!
-        // Offset in Handshake Message: Type(1) + Len(3) + Ver(2) + Rnd(32) + SID_Len(1) = 39
-        let mut aad_buffer = if full_client_hello.len() > 5 && full_client_hello[0] == 0x16 { 
-            full_client_hello[5..].to_vec() 
+        let handshake_msg = if full_client_hello.len() > 5 && full_client_hello[0] == 0x16 { 
+            &full_client_hello[5..] 
         } else { 
-            full_client_hello.to_vec() 
+            full_client_hello 
         };
 
-        if aad_buffer.len() >= 39 + 32 {
-            // Zero out the SessionID field (32 bytes)
+        let mut aad_buffer = handshake_msg.to_vec();
+        
+        // Robust search for session_id in AAD buffer
+        let sid_hex = hex::encode(&info.session_id);
+        let aad_hex = hex::encode(&aad_buffer);
+        if let Some(pos_char) = aad_hex.find(&sid_hex) {
+            let pos = pos_char / 2;
+            debug!("Reality Debug: Found session_id in AAD at offset {}", pos);
+            // Zero it
             for i in 0..32 {
-                aad_buffer[39 + i] = 0;
+                if pos + i < aad_buffer.len() {
+                    aad_buffer[pos + i] = 0;
+                }
+            }
+        } else {
+            warn!("Reality verification failed: Could not find SessionID in handshake AAD buffer! Falling back to offset 39 guess.");
+            // Fallback to offset 39 guess if not found (Type(1) + Len(3) + Ver(2) + Rnd(32) + SID_Len(1) = 39)
+            if aad_buffer.len() >= 39 + 32 {
+                for i in 0..32 { aad_buffer[39 + i] = 0; }
             }
         }
+        debug!("Reality Debug: AAD buffer (after zeroing SID): {}", hex::encode(&aad_buffer));
 
         let mut buffer = info.session_id.clone();
         
         // Decrypt SessionID in-place using the zeroed-out AAD
         if cipher.decrypt_in_place(nonce, &aad_buffer, &mut buffer).is_err() {
-            // Backup check: It's possible some clients use the original AAD? 
-            // But Xray-core strictly zeroes it out.
-            warn!("Reality verification failed: AEAD Decrypt error. Offset 39 zeroed in AAD.");
+            warn!("Reality verification failed: AEAD Decrypt error (Salt=20).");
             return false;
         }
+        debug!("Reality Debug: Decrypted SessionID payload: {}", hex::encode(&buffer));
 
-        // 5. Verify ShortId
+        // 6. Verify ShortId
         // Decrypted buffer: [Timestamp(4) | ShortId(8) | PayloadTag]
         if buffer.len() < 12 { 
             warn!("Reality verification failed: Decrypted payload too short ({})", buffer.len());
