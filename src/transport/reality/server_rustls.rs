@@ -186,7 +186,7 @@ impl RealityServerRustls {
         };
 
         if cipher.decrypt_in_place(nonce, aad, &mut buffer).is_err() {
-            // Decryption failed means Auth failed
+            warn!("Reality verification failed: AEAD Decrypt error. Check Public/Private Key match.");
             return false;
         }
         
@@ -194,9 +194,11 @@ impl RealityServerRustls {
         // Decrypted buffer: [Time(4) | ShortId(8) | Tag(16) - REMOVED by decrypt]
         // `decrypt_in_place` removes tag. So buffer size becomes 16 bytes.
         
-        if buffer.len() < 12 { return false; }
+        if buffer.len() < 12 { 
+            warn!("Reality verification failed: Decrypted payload too short");
+            return false; 
+        }
         let short_id_bytes = &buffer[4..12]; 
-        let short_id_hex = hex::encode(short_id_bytes);
         
         // Check valid shortIds
         // self.reality_config.short_ids is Vec<Vec<u8>>
@@ -208,6 +210,10 @@ impl RealityServerRustls {
             }
         }
         
+        if !found {
+            warn!("Reality verification failed: ShortId {} not allowed. Allowed: {:?}", hex::encode(short_id_bytes), self.reality_config.short_ids.iter().map(hex::encode).collect::<Vec<_>>());
+        }
+
         found
     }
 
