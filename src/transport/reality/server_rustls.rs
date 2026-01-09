@@ -17,15 +17,26 @@ use bytes::Buf;
 
 use super::hello_parser::{self, ClientHelloInfo};
 
-#[derive(Clone)]
 pub struct RealityServerRustls {
-    acceptor: TlsAcceptor,
-    bypass_acceptor: TlsAcceptor,
     reality_config: Arc<RealityConfig>,
+    certs: Vec<CertificateDer<'static>>,
+    key: PrivateKeyDer<'static>,
+}
+
+impl Clone for RealityServerRustls {
+    fn clone(&self) -> Self {
+        Self {
+            reality_config: Arc::clone(&self.reality_config),
+            certs: self.certs.clone(),
+            key: match &self.key {
+                PrivateKeyDer::Pkcs8(p) => PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(p.secret_pkcs8_der().to_vec())),
+                _ => panic!("Unsupported key type"),
+            },
+        }
+    }
 }
 
 impl RealityServerRustls {
-    /// Create a new Reality server with rustls
     pub fn new(private_key: Vec<u8>, dest: Option<String>, short_ids: Vec<String>) -> Result<Self> {
         let mut short_ids_bytes = Vec::new();
         for id in short_ids {
@@ -33,154 +44,123 @@ impl RealityServerRustls {
             short_ids_bytes.push(b);
         }
 
-        let base_reality_config = RealityConfig::new(private_key)
+        let reality_config = RealityConfig::new(private_key)
             .with_verify_client(true)
             .with_short_ids(short_ids_bytes)
             .with_dest(dest.unwrap_or_else(|| "www.microsoft.com:443".to_string()));
 
-        base_reality_config.validate().map_err(|e| anyhow!("Reality config validation failed: {:?}", e))?;
+        reality_config.validate().map_err(|e| anyhow!("Reality config validation failed: {:?}", e))?;
 
-        let dest_str = base_reality_config.dest.as_deref().unwrap_or("www.microsoft.com");
+        let dest_str = reality_config.dest.as_deref().unwrap_or("www.microsoft.com");
         let dest_host = dest_str.split(':').next().unwrap_or("www.microsoft.com");
-        let subject_alt_names = vec![dest_host.to_string()];
-        
-        let cert = rcgen::generate_simple_self_signed(subject_alt_names)
+        let cert = rcgen::generate_simple_self_signed(vec![dest_host.to_string()])
             .map_err(|e| anyhow!("Failed to generate self-signed cert: {}", e))?;
-        let cert_der = cert.serialize_der().map_err(|e| anyhow!("Failed to serialize cert: {}", e))?;
-        let key_der = cert.serialize_private_key_der();
-        let certs = vec![CertificateDer::from(cert_der)];
-        let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key_der));
-
-        // 1. Standard config
-        let mut config_std = ServerConfig::builder().with_no_client_auth().with_single_cert(certs.clone(), key.clone_key())
-            .map_err(|e| anyhow!("Failed to create ServerConfig: {}", e))?;
-        config_std.reality_config = Some(Arc::new(base_reality_config.clone()));
-        let acceptor = TlsAcceptor::from(Arc::new(config_std));
-
-        // 2. Bypass config (always injects Reality signature)
-        let mut bypass_reality = base_reality_config.clone();
-        bypass_reality.verify_client = false; 
-        let mut config_bypass = ServerConfig::builder().with_no_client_auth().with_single_cert(certs, key)
-            .map_err(|e| anyhow!("Failed to create ServerConfig: {}", e))?;
-        config_bypass.reality_config = Some(Arc::new(bypass_reality));
-        let bypass_acceptor = TlsAcceptor::from(Arc::new(config_bypass));
+        
+        let certs = vec![CertificateDer::from(cert.serialize_der().map_err(|e| anyhow!("Cert serialization fail: {}", e))?)];
+        let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(cert.serialize_private_key_der()));
 
         Ok(Self { 
-            acceptor,
-            bypass_acceptor,
-            reality_config: Arc::new(base_reality_config),
+            reality_config: Arc::new(reality_config),
+            certs,
+            key,
         })
     }
 
-    /// Accept a connection.
     pub async fn accept(&self, mut stream: TcpStream) -> Result<tokio_rustls::server::TlsStream<PrefixedStream<TcpStream>>> {
         let mut buffer = Vec::with_capacity(2048);
         while buffer.len() < 5 {
             let mut chunk = [0u8; 1024];
             let n = stream.read(&mut chunk).await?;
-            if n == 0 {
-                if buffer.is_empty() { bail!("Connection closed empty"); }
-                break; 
-            }
+            if n == 0 { bail!("Connection closed early"); }
             buffer.extend_from_slice(&chunk[..n]);
         }
 
-        let mut needed = buffer.len();
-        if buffer.len() >= 5 && buffer[0] == 0x16 {
-            let len = u16::from_be_bytes([buffer[3], buffer[4]]) as usize;
-            needed = 5 + len;
-        }
-
-        let limit = 16384; 
-        while buffer.len() < needed && buffer.len() < limit {
+        let needed = if buffer[0] == 0x16 { 5 + u16::from_be_bytes([buffer[3], buffer[4]]) as usize } else { buffer.len() };
+        while buffer.len() < needed && buffer.len() < 16384 {
              let mut chunk = [0u8; 1024];
              let n = stream.read(&mut chunk).await?;
              if n == 0 { break; }
              buffer.extend_from_slice(&chunk[..n]);
         }
 
-        let full_client_hello = &buffer;
-        let parse_result = hello_parser::parse_client_hello(full_client_hello);
+        if let Ok(Some(info)) = hello_parser::parse_client_hello(&buffer) {
+            if let Some((offset, auth_key)) = self.verify_client_reality(&info, &buffer) {
+                info!("Reality: Verified client (Offset {}), using session AuthKey for ServerHello signature", offset);
+                
+                let mut conn_reality_config = (*self.reality_config).clone();
+                conn_reality_config.private_key = auth_key.to_vec();
+                conn_reality_config.verify_client = false; 
 
-        if let Ok(Some(ref info)) = parse_result {
-            if self.verify_client_reality(info, full_client_hello).is_some() {
-                // Reality client verified (any offset!)
-                // Proceed using bypass_acceptor to ensure ServerHello injection
+                let mut config = ServerConfig::builder()
+                    .with_no_client_auth()
+                    .with_single_cert(self.certs.clone(), self.key.clone_key())
+                    .map_err(|e| anyhow!("Config build fail: {}", e))?;
+                config.reality_config = Some(Arc::new(conn_reality_config));
+
+                let acceptor = TlsAcceptor::from(Arc::new(config));
                 let prefixed = PrefixedStream::new(buffer, stream);
-                let tls_stream = self.bypass_acceptor.accept(prefixed).await?;
-                info!("Reality handshake successful");
-                return Ok(tls_stream);
+                
+                match acceptor.accept(prefixed).await {
+                    Ok(tls) => {
+                        info!("Reality handshake successful");
+                        return Ok(tls);
+                    }
+                    Err(e) => {
+                        error!("Reality TLS handshake failed: {}", e);
+                        bail!("Handshake failure");
+                    }
+                }
             }
         }
 
-        // Fallback for non-reality
         let dest = self.reality_config.dest.as_deref().unwrap_or("www.microsoft.com:443");
-        info!("Non-Reality client detected from {}, falling back...", stream.peer_addr().map(|a| a.to_string()).unwrap_or_default());
+        info!("Non-Reality client, falling back to {}", dest);
         self.fallback(stream, &buffer, dest).await?;
-        bail!("Reality fallback handled");
+        bail!("Fallback total");
     }
 
-    fn verify_client_reality(&self, info: &ClientHelloInfo, full_client_hello: &[u8]) -> Option<usize> {
-        if info.session_id.len() != 32 { return None; }
-        let client_pub_key_bytes = info.public_key.as_ref()?;
-        if client_pub_key_bytes.len() != 32 { return None; }
+    fn verify_client_reality(&self, info: &ClientHelloInfo, full_hello: &[u8]) -> Option<(usize, [u8; 32])> {
+        if info.session_id.len() != 32 || info.public_key.is_none() { return None; }
         
-        let mut server_priv_bytes = [0u8; 32];
-        server_priv_bytes.copy_from_slice(&self.reality_config.private_key);
-        let client_pub_array: [u8; 32] = client_pub_key_bytes.as_slice().try_into().ok()?;
-        let shared_secret = StaticSecret::from(server_priv_bytes).diffie_hellman(&X25519PublicKey::from(client_pub_array));
+        let mut server_priv = [0u8; 32];
+        server_priv.copy_from_slice(&self.reality_config.private_key);
+        let client_pub: [u8; 32] = info.public_key.as_ref()?.as_slice().try_into().ok()?;
         
-        let hk = Hkdf::<Sha256>::new(Some(&info.client_random[0..20]), shared_secret.as_bytes());
+        let shared = StaticSecret::from(server_priv).diffie_hellman(&X25519PublicKey::from(client_pub));
+        let hk = Hkdf::<Sha256>::new(Some(&info.client_random[0..20]), shared.as_bytes());
         let mut auth_key = [0u8; 32];
         if hk.expand(b"REALITY", &mut auth_key).is_err() { return None; }
 
         let cipher = Aes256Gcm::new(aes_gcm::Key::<Aes256Gcm>::from_slice(&auth_key));
         let nonce = Nonce::from_slice(&info.client_random[20..32]);
 
-        let handshake_msg = if full_client_hello.len() > 5 && full_client_hello[0] == 0x16 { &full_client_hello[5..] } else { full_client_hello };
-        let mut aad_buffer = handshake_msg.to_vec();
-        let sid_hex = hex::encode(&info.session_id);
-        if let Some(pos_char) = hex::encode(&aad_buffer).find(&sid_hex) {
-            let pos = pos_char / 2;
-            for i in 0..32 { if pos + i < aad_buffer.len() { aad_buffer[pos + i] = 0; } }
+        let handshake_msg = if full_hello[0] == 0x16 { &full_hello[5..] } else { full_hello };
+        let mut aad = handshake_msg.to_vec();
+        if let Some(pos) = hex::encode(&aad).find(&hex::encode(&info.session_id)).map(|p| p/2) {
+            for i in 0..32 { if pos + i < aad.len() { aad[pos + i] = 0; } }
         }
 
-        let mut buffer = info.session_id.clone();
-        if cipher.decrypt_in_place(nonce, &aad_buffer, &mut buffer).is_err() { return None; }
+        let mut buf = info.session_id.clone();
+        if cipher.decrypt_in_place(nonce, &aad, &mut buf).is_err() { return None; }
+        if buf.len() < 16 { return None; }
 
-        if buffer.len() < 16 { return None; }
-        let sid_4 = &buffer[4..12];
-        let sid_8 = &buffer[8..16];
-        
-        for param_id in &self.reality_config.short_ids {
-            if param_id == sid_8 { return Some(8); }
-            if param_id == sid_4 { return Some(4); }
+        for sid in &self.reality_config.short_ids {
+            if sid == &buf[4..12] { return Some((4, auth_key)); }
+            if sid == &buf[8..16] { return Some((8, auth_key)); }
         }
         None
     }
 
-    async fn fallback(&self, mut stream: TcpStream, prefix: &[u8], dest_addr: &str) -> Result<()> {
-        let mut dest_stream = TcpStream::connect(dest_addr).await?;
+    async fn fallback(&self, mut stream: TcpStream, prefix: &[u8], dest: &str) -> Result<()> {
+        let mut dest_stream = TcpStream::connect(dest).await?;
         dest_stream.write_all(prefix).await?;
         tokio::io::copy_bidirectional(&mut stream, &mut dest_stream).await?;
         Ok(())
     }
 }
 
-pub struct PrefixedStream<S> {
-    prefix: std::io::Cursor<Vec<u8>>,
-    inner: S,
-}
-
-impl<S> PrefixedStream<S> {
-    pub fn new(prefix: Vec<u8>, inner: S) -> Self {
-        Self {
-            prefix: std::io::Cursor::new(prefix),
-            inner,
-        }
-    }
-}
-
+pub struct PrefixedStream<S> { prefix: std::io::Cursor<Vec<u8>>, inner: S }
+impl<S> PrefixedStream<S> { pub fn new(prefix: Vec<u8>, inner: S) -> Self { Self { prefix: std::io::Cursor::new(prefix), inner } } }
 impl<S: AsyncRead + Unpin> AsyncRead for PrefixedStream<S> {
     fn poll_read(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<std::io::Result<()>> {
         if self.prefix.has_remaining() {
@@ -193,15 +173,8 @@ impl<S: AsyncRead + Unpin> AsyncRead for PrefixedStream<S> {
         Pin::new(&mut self.inner).poll_read(cx, buf)
     }
 }
-
 impl<S: AsyncWrite + Unpin> AsyncWrite for PrefixedStream<S> {
-    fn poll_write(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<std::io::Result<usize>> {
-        Pin::new(&mut self.inner).poll_write(cx, buf)
-    }
-    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        Pin::new(&mut self.inner).poll_flush(cx)
-    }
-    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        Pin::new(&mut self.inner).poll_shutdown(cx)
-    }
+    fn poll_write(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<std::io::Result<usize>> { Pin::new(&mut self.inner).poll_write(cx, buf) }
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> { Pin::new(&mut self.inner).poll_flush(cx) }
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> { Pin::new(&mut self.inner).poll_shutdown(cx) }
 }
