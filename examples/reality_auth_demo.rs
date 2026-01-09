@@ -12,8 +12,12 @@ fn main() {
     println!("1. Creating Reality server...");
     println!("   Private key: {:02x?}...", &private_key[0..8]);
 
-    let server = RealityServerRustls::new(private_key, Some("www.microsoft.com:443".to_string()))
-        .expect("Failed to create Reality server");
+    let server = RealityServerRustls::new(
+        private_key,
+        Some("www.microsoft.com:443".to_string()),
+        vec![],
+    )
+    .expect("Failed to create Reality server");
     println!("   ✓ Server created successfully\n");
 
     // 2. Simulate ServerHello.random generation

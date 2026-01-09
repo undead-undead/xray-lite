@@ -22,19 +22,32 @@ async fn test_reality_fallback() -> Result<()> {
     let private_key = vec![0x42; 32];
     let server = RealityServerRustls::new(
         private_key, 
-        Some(dest_addr.to_string())
+        Some(dest_addr.to_string()),
+        vec!["0123456789abcdef".to_string()]
     )?;
     
     // Pick a random port
     let server_listener = TcpListener::bind("127.0.0.1:0").await?;
     let server_addr = server_listener.local_addr()?;
     let server_port = server_addr.port();
-    drop(server_listener);
     
     // Run server in background
     let server = std::sync::Arc::new(server);
+    let listener = server_listener; // Transfer ownership
+    
     tokio::spawn(async move {
-        server.run(&format!("127.0.0.1:{}", server_port)).await.unwrap();
+        loop {
+            if let Ok((stream, _)) = listener.accept().await {
+                let s = server.clone();
+                tokio::spawn(async move {
+                    // accept() handles Sniff-and-Dispatch.
+                    // If fallback, it returns Err("Reality fallback handled").
+                    // If success, it returns Ok(tls_stream). 
+                    // We just let it run.
+                    let _ = s.accept(stream).await;
+                });
+            }
+        }
     });
 
     // Allow server to start
