@@ -232,26 +232,27 @@ impl Server {
                 
                 // 使用 timeout 防止阻塞
                 match tokio::time::timeout(std::time::Duration::from_millis(200), stream.read(&mut buf)).await {
-                    Ok(Ok(n)) if n > 0 => {
-                        // 成功读取到了数据
-                        initial_data.extend_from_slice(&buf[..n]);
-                        
-                        // 尝试嗅探
-                        if let Some(sni) = crate::protocol::sniffer::sniff_tls_sni(&initial_data) {
-                            // 提取端口 (手动匹配 Address 枚举)
-                            let port = match &request.address {
-                                crate::protocol::vless::Address::Ipv4(_, p) => *p,
-                                crate::protocol::vless::Address::Domain(_, p) => *p,
-                                crate::protocol::vless::Address::Ipv6(_, p) => *p,
-                            };
+                    Ok(Ok(n)) => {
+                        if n > 0 {
+                            // 成功读取到了数据
+                            initial_data.extend_from_slice(&buf[..n]);
                             
-                            info!("🕵️ Sniffed domain: {} (Override original: {})", sni, target_address);
-                            target_address = format!("{}:{}", sni, port);
-                        } else {
-                            debug!("No SNI found in initial data ({} bytes)", n);
+                            // 尝试嗅探
+                            if let Some(sni) = crate::protocol::sniffer::sniff_tls_sni(&initial_data) {
+                                // 提取端口 (手动匹配 Address 枚举)
+                                let port = match &request.address {
+                                    crate::protocol::vless::Address::Ipv4(_, p) => *p,
+                                    crate::protocol::vless::Address::Domain(_, p) => *p,
+                                    crate::protocol::vless::Address::Ipv6(_, p) => *p,
+                                };
+                                
+                                info!("🕵️ Sniffed domain: {} (Override original: {})", sni, target_address);
+                                target_address = format!("{}:{}", sni, port);
+                            } else {
+                                debug!("No SNI found in initial data ({} bytes)", n);
+                            }
                         }
                     },
-                    Ok(Ok(0)) => { /* EOF */ },
                     Ok(Err(e)) => {
                         error!("Failed to sniff initial data: {}", e);
                         return Err(e.into());
