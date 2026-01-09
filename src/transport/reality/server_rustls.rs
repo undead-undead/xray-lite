@@ -85,6 +85,7 @@ impl RealityServerRustls {
 
         if let Ok(Some(info)) = hello_parser::parse_client_hello(&buffer) {
             if let Some((offset, auth_key)) = self.verify_client_reality(&info, &buffer) {
+                debug!("Reality: Derived AuthKey[0..4]: {:02x?}", &auth_key[0..4]);
                 info!("Reality: Verified client (Offset {}), using session AuthKey for ServerHello signature", offset);
                 
                 let mut conn_reality_config = (*self.reality_config).clone();
