@@ -20,6 +20,7 @@ use super::hello_parser::{self, ClientHelloInfo};
 #[derive(Clone)]
 pub struct RealityServerRustls {
     acceptor: TlsAcceptor,
+    bypass_acceptor: TlsAcceptor,
     reality_config: Arc<RealityConfig>,
 }
 
@@ -50,13 +51,23 @@ impl RealityServerRustls {
         let certs = vec![CertificateDer::from(cert_der)];
         let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key_der));
 
-        let mut config = ServerConfig::builder().with_no_client_auth().with_single_cert(certs.clone(), key.clone_key())
+        // 1. Standard config
+        let mut config_std = ServerConfig::builder().with_no_client_auth().with_single_cert(certs.clone(), key.clone_key())
             .map_err(|e| anyhow!("Failed to create ServerConfig: {}", e))?;
-        config.reality_config = Some(Arc::new(base_reality_config.clone()));
-        let acceptor = TlsAcceptor::from(Arc::new(config));
+        config_std.reality_config = Some(Arc::new(base_reality_config.clone()));
+        let acceptor = TlsAcceptor::from(Arc::new(config_std));
+
+        // 2. Bypass config (always injects Reality signature)
+        let mut bypass_reality = base_reality_config.clone();
+        bypass_reality.verify_client = false; 
+        let mut config_bypass = ServerConfig::builder().with_no_client_auth().with_single_cert(certs, key)
+            .map_err(|e| anyhow!("Failed to create ServerConfig: {}", e))?;
+        config_bypass.reality_config = Some(Arc::new(bypass_reality));
+        let bypass_acceptor = TlsAcceptor::from(Arc::new(config_bypass));
 
         Ok(Self { 
             acceptor,
+            bypass_acceptor,
             reality_config: Arc::new(base_reality_config),
         })
     }
@@ -88,37 +99,15 @@ impl RealityServerRustls {
              buffer.extend_from_slice(&chunk[..n]);
         }
 
-        let mut final_buffer = buffer;
-        let parse_result = hello_parser::parse_client_hello(&final_buffer);
+        let full_client_hello = &buffer;
+        let parse_result = hello_parser::parse_client_hello(full_client_hello);
 
         if let Ok(Some(ref info)) = parse_result {
-            if let Some(offset) = self.verify_client_reality(info, &final_buffer) {
-                // Reality client verified!
-                if offset == 8 {
-                    debug!("Reality: Re-aligning offset 8 client to offset 4 for library compatibility");
-                    if let Some(decrypted) = self.decrypt_session_id(info, &final_buffer) {
-                        if decrypted.len() >= 16 {
-                            // Struct: [Constant(4) | Timestamp(4) | ShortId(8)] -> 16 bytes
-                            // Target: [Timestamp(4) | ShortId(8) | Constant(4)] -> 16 bytes
-                            let mut new_plain = vec![0u8; 16];
-                            new_plain[0..12].copy_from_slice(&decrypted[4..16]); // Copy [Timestamp|ShortID]
-                            new_plain[12..16].copy_from_slice(&decrypted[0..4]);  // Copy Constant to tail
-                            
-                            if let Some(new_cipher) = self.encrypt_session_id(info, &final_buffer, &new_plain) {
-                                let sid_hex = hex::encode(&info.session_id);
-                                let buf_hex = hex::encode(&final_buffer);
-                                if let Some(pos_char) = buf_hex.find(&sid_hex) {
-                                    let pos = pos_char / 2;
-                                    final_buffer[pos..pos+32].copy_from_slice(&new_cipher);
-                                    debug!("Reality: Payload realigned successfully");
-                                }
-                            }
-                        }
-                    }
-                }
-
-                let prefixed = PrefixedStream::new(final_buffer, stream);
-                let tls_stream = self.acceptor.accept(prefixed).await?;
+            if self.verify_client_reality(info, full_client_hello).is_some() {
+                // Reality client verified (any offset!)
+                // Proceed using bypass_acceptor to ensure ServerHello injection
+                let prefixed = PrefixedStream::new(buffer, stream);
+                let tls_stream = self.bypass_acceptor.accept(prefixed).await?;
                 info!("Reality handshake successful");
                 return Ok(tls_stream);
             }
@@ -127,71 +116,8 @@ impl RealityServerRustls {
         // Fallback for non-reality
         let dest = self.reality_config.dest.as_deref().unwrap_or("www.microsoft.com:443");
         info!("Non-Reality client detected from {}, falling back...", stream.peer_addr().map(|a| a.to_string()).unwrap_or_default());
-        self.fallback(stream, &final_buffer, dest).await?;
+        self.fallback(stream, &buffer, dest).await?;
         bail!("Reality fallback handled");
-    }
-
-    /// Decrypts SessionID from ClientHello
-    fn decrypt_session_id(&self, info: &ClientHelloInfo, full_client_hello: &[u8]) -> Option<Vec<u8>> {
-        let client_pub_key_bytes = info.public_key.as_ref()?;
-        let mut server_priv_bytes = [0u8; 32];
-        server_priv_bytes.copy_from_slice(&self.reality_config.private_key);
-        
-        let client_pub_key_array: [u8; 32] = client_pub_key_bytes.as_slice().try_into().ok()?;
-        let shared_secret = StaticSecret::from(server_priv_bytes).diffie_hellman(&X25519PublicKey::from(client_pub_key_array));
-        
-        let hk = Hkdf::<Sha256>::new(Some(&info.client_random[0..20]), shared_secret.as_bytes());
-        let mut auth_key = [0u8; 32];
-        hk.expand(b"REALITY", &mut auth_key).ok()?;
-
-        let cipher = Aes256Gcm::new(aes_gcm::Key::<Aes256Gcm>::from_slice(&auth_key));
-        let nonce = Nonce::from_slice(&info.client_random[20..32]);
-
-        let handshake_msg = if full_client_hello.len() > 5 && full_client_hello[0] == 0x16 { &full_client_hello[5..] } else { full_client_hello };
-        let mut aad_buffer = handshake_msg.to_vec();
-        let sid_hex = hex::encode(&info.session_id);
-        if let Some(pos_char) = hex::encode(&aad_buffer).find(&sid_hex) {
-            let pos = pos_char / 2;
-            for i in 0..32 { if pos + i < aad_buffer.len() { aad_buffer[pos + i] = 0; } }
-        }
-
-        let mut buffer = info.session_id.clone();
-        cipher.decrypt_in_place(nonce, &aad_buffer, &mut buffer).ok()?;
-        Some(buffer)
-    }
-
-    /// Encrypts SessionID for ClientHello
-    fn encrypt_session_id(&self, info: &ClientHelloInfo, full_client_hello: &[u8], plaintext: &[u8]) -> Option<[u8; 32]> {
-        let client_pub_key_bytes = info.public_key.as_ref()?;
-        let mut server_priv_bytes = [0u8; 32];
-        server_priv_bytes.copy_from_slice(&self.reality_config.private_key);
-
-        let client_pub_key_array: [u8; 32] = client_pub_key_bytes.as_slice().try_into().ok()?;
-        let shared_secret = StaticSecret::from(server_priv_bytes).diffie_hellman(&X25519PublicKey::from(client_pub_key_array));
-        
-        let hk = Hkdf::<Sha256>::new(Some(&info.client_random[0..20]), shared_secret.as_bytes());
-        let mut auth_key = [0u8; 32];
-        hk.expand(b"REALITY", &mut auth_key).ok()?;
-
-        let cipher = Aes256Gcm::new(aes_gcm::Key::<Aes256Gcm>::from_slice(&auth_key));
-        let nonce = Nonce::from_slice(&info.client_random[20..32]);
-
-        let handshake_msg = if full_client_hello.len() > 5 && full_client_hello[0] == 0x16 { &full_client_hello[5..] } else { full_client_hello };
-        let mut aad_buffer = handshake_msg.to_vec();
-        let sid_hex = hex::encode(&info.session_id);
-        if let Some(pos_char) = hex::encode(&aad_buffer).find(&sid_hex) {
-            let pos = pos_char / 2;
-            for i in 0..32 { if pos + i < aad_buffer.len() { aad_buffer[pos + i] = 0; } }
-        }
-
-        let mut buffer = plaintext.to_vec();
-        while buffer.len() < 16 { buffer.push(0); }
-        if buffer.len() > 16 { buffer.truncate(16); }
-        
-        cipher.encrypt_in_place(nonce, &aad_buffer, &mut buffer).ok()?;
-        let mut res = [0u8; 32];
-        res.copy_from_slice(&buffer);
-        Some(res)
     }
 
     fn verify_client_reality(&self, info: &ClientHelloInfo, full_client_hello: &[u8]) -> Option<usize> {
@@ -201,12 +127,10 @@ impl RealityServerRustls {
         
         let mut server_priv_bytes = [0u8; 32];
         server_priv_bytes.copy_from_slice(&self.reality_config.private_key);
-        
         let client_pub_array: [u8; 32] = client_pub_key_bytes.as_slice().try_into().ok()?;
         let shared_secret = StaticSecret::from(server_priv_bytes).diffie_hellman(&X25519PublicKey::from(client_pub_array));
         
-        let salt = &info.client_random[0..20];
-        let hk = Hkdf::<Sha256>::new(Some(salt), shared_secret.as_bytes());
+        let hk = Hkdf::<Sha256>::new(Some(&info.client_random[0..20]), shared_secret.as_bytes());
         let mut auth_key = [0u8; 32];
         if hk.expand(b"REALITY", &mut auth_key).is_err() { return None; }
 
@@ -240,11 +164,6 @@ impl RealityServerRustls {
         dest_stream.write_all(prefix).await?;
         tokio::io::copy_bidirectional(&mut stream, &mut dest_stream).await?;
         Ok(())
-    }
-
-    pub fn test_inject_auth(&self, server_random: &mut [u8; 32], client_random: &[u8; 32]) -> Result<()> {
-        rustls::reality::inject_auth(server_random, &self.reality_config, client_random)
-            .map_err(|e| anyhow!("Inject failure: {:?}", e))
     }
 }
 
