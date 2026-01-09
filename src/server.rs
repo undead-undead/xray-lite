@@ -228,10 +228,9 @@ impl Server {
 
                 // --- 🌟 SNIFFING START ---
                 // 尝试预读取数据以嗅探 SNI
-                // 我们读取一小块数据（例如 ClientHello），如果能嗅探到域名，就覆盖 target_address
                 let mut buf = vec![0u8; 4096];
                 
-                // 使用 timeout 防止阻塞，因为客户端可能等待咱们先发数据（虽然 VLESS TCP 通常是客户端先发）
+                // 使用 timeout 防止阻塞
                 match tokio::time::timeout(std::time::Duration::from_millis(200), stream.read(&mut buf)).await {
                     Ok(Ok(n)) if n > 0 => {
                         // 成功读取到了数据
@@ -239,24 +238,25 @@ impl Server {
                         
                         // 尝试嗅探
                         if let Some(sni) = crate::protocol::sniffer::sniff_tls_sni(&initial_data) {
+                            // 提取端口 (手动匹配 Address 枚举)
+                            let port = match &request.address {
+                                crate::protocol::vless::Address::Ipv4(_, p) => *p,
+                                crate::protocol::vless::Address::Domain(_, p) => *p,
+                                crate::protocol::vless::Address::Ipv6(_, p) => *p,
+                            };
+                            
                             info!("🕵️ Sniffed domain: {} (Override original: {})", sni, target_address);
-                            // 如果原来的地址是 IP，且嗅探到了域名，则使用域名连接
-                            // 这里我们假设端口不变（通常是 443）
-                            let port = request.address.port();
                             target_address = format!("{}:{}", sni, port);
                         } else {
                             debug!("No SNI found in initial data ({} bytes)", n);
                         }
                     },
-                    Ok(Ok(0)) => {
-                        // EOF?
-                    },
+                    Ok(Ok(0)) => { /* EOF */ },
                     Ok(Err(e)) => {
                         error!("Failed to sniff initial data: {}", e);
                         return Err(e.into());
                     },
                     Err(_) => {
-                        // Timeout - 客户端可能在等待服务器先发送数据（不常见但可能）
                         debug!("Sniffing timed out, proceeding with original address");
                     }
                 }

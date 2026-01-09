@@ -49,7 +49,7 @@ async fn main() -> Result<()> {
         .with_thread_ids(true)
         .init();
 
-    info!("🚀 Starting VLESS+Reality+XHTTP Server [V24-SNIFFING]");
+    info!("🚀 Starting VLESS+Reality+XHTTP Server [V25-SNIFFING-FIX]");
     info!("📄 Loading config from: {}", args.config);
 
     // 加载配置
