@@ -252,26 +252,33 @@ impl RealityServerRustls {
         debug!("Reality Debug: Decrypted SessionID payload: {}", hex::encode(&buffer));
 
         // 6. Verify ShortId
-        // Decrypted buffer: [Timestamp(4) | ShortId(8) | PayloadTag]
-        if buffer.len() < 12 { 
+        // Decrypted buffer structure can vary by client:
+        // Case A (Standard): [Timestamp(4) | ShortId(8) | ...] -> Offset 4
+        // Case B (Some uTLS): [Constant(4) | Timestamp(4) | ShortId(8) | ...] -> Offset 8
+        if buffer.len() < 16 { 
             warn!("Reality verification failed: Decrypted payload too short ({})", buffer.len());
             return false; 
         }
-        let short_id_bytes = &buffer[4..12]; 
+        
+        let sid_4 = &buffer[4..12];
+        let sid_8 = &buffer[8..16];
         
         let mut found = false;
         for param_id in &self.reality_config.short_ids {
-            if param_id == short_id_bytes {
+            if param_id == sid_4 || param_id == sid_8 {
                 found = true;
                 break;
             }
         }
         
         if !found {
-            warn!("Reality verification failed: ShortId mismatch. Got: {}, Expected one of: {:?}", 
-                hex::encode(short_id_bytes),
+            warn!("Reality verification failed: ShortId mismatch. Payload[4..12]: {}, Payload[8..16]: {}, Expected one of: {:?}", 
+                hex::encode(sid_4),
+                hex::encode(sid_8),
                 self.reality_config.short_ids.iter().map(hex::encode).collect::<Vec<_>>()
             );
+        } else {
+            info!("Reality client verified successfully (ShortID matched)");
         }
 
         found
