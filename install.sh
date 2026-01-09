@@ -19,25 +19,154 @@ BLUE='\033[0;34m'
 NC='\033[0m'
 
 # Version / 版本
-# Version / 版本
 VERSION="v0.2.8"
 REPO="undead-undead/xray-lite"
 
-# ... (omitted) ...
+echo -e "${BLUE}=========================================${NC}"
+echo -e "${BLUE}  Xray-Lite One-Click Installation${NC}"
+echo -e "${BLUE}  Xray-Lite 一键安装${NC}"
+echo -e "${BLUE}  Version / 版本: ${VERSION}${NC}"
+echo -e "${BLUE}=========================================${NC}"
+echo ""
+
+# Check if running as root / 检查是否为 root
+if [ "$EUID" -ne 0 ]; then 
+    echo -e "${RED}Please run as root / 请使用 root 权限运行${NC}"
+    echo "sudo bash install.sh"
+    exit 1
+fi
+
+# Detect architecture / 检测架构
+ARCH=$(uname -m)
+case $ARCH in
+    x86_64)
+        BINARY_ARCH="x86_64"
+        ;;
+    aarch64|arm64)
+        BINARY_ARCH="aarch64"
+        ;;
+    *)
+        echo -e "${RED}Unsupported architecture: $ARCH / 不支持的架构: $ARCH${NC}"
+        exit 1
+        ;;
+esac
+
+echo -e "${GREEN}Detected architecture / 检测到架构: $ARCH${NC}"
+echo ""
+
+# Stop existing service / 停止现有服务
+echo -e "${YELLOW}Checking for existing installation... / 检查现有安装...${NC}"
+if systemctl is-active --quiet xray-lite; then
+    echo "Stopping existing xray-lite service... / 停止现有 xray-lite 服务..."
+    systemctl stop xray-lite
+    systemctl disable xray-lite
+fi
+
+# Kill any lingering vless-server processes
+pkill -f vless-server || true
+
+echo ""
+
+# Create installation directory / 创建安装目录
+INSTALL_DIR="/opt/xray-lite"
+echo -e "${YELLOW}[1/6] Creating installation directory... / 创建安装目录...${NC}"
+mkdir -p $INSTALL_DIR
+cd $INSTALL_DIR
+echo -e "${GREEN}✓ Directory created / 目录已创建: $INSTALL_DIR${NC}"
+echo ""
+
+# Download binary / 下载二进制文件
+echo -e "${YELLOW}[2/6] Downloading Xray-Lite binary... / 下载 Xray-Lite 二进制文件...${NC}"
+
+DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${VERSION}/xray-lite-${BINARY_ARCH}-unknown-linux-gnu.tar.gz"
+FALLBACK_URL="https://raw.githubusercontent.com/${REPO}/main/xray-lite-${BINARY_ARCH}-unknown-linux-gnu.tar.gz"
+# Fallback to release_artifacts in main repo if root raw failed
+FALLBACK_RA_URL="https://raw.githubusercontent.com/${REPO}/main/release_artifacts/xray-lite-${BINARY_ARCH}-unknown-linux-gnu.tar.gz"
+
+download_file() {
+    local url=$1
+    local output=$2
+    if command -v wget &> /dev/null; then
+        wget -q --show-progress "$url" -O "$output"
+    elif command -v curl &> /dev/null; then
+        curl -L --progress-bar "$url" -o "$output"
+    else
+        return 1
+    fi
+}
+
+if download_file "$DOWNLOAD_URL" "xray-lite.tar.gz"; then
+    echo -e "${GREEN}✓ Download complete / 下载完成${NC}"
+    if [ ! -s xray-lite.tar.gz ]; then rm xray-lite.tar.gz; fi
+fi
+
+if [ ! -f xray-lite.tar.gz ]; then
+    echo -e "${YELLOW}Release download failed, trying raw artifacts... / Release 下载失败，尝试原始构建...${NC}"
+    if download_file "$FALLBACK_RA_URL" "xray-lite.tar.gz"; then
+         echo -e "${GREEN}✓ Download complete (Artifacts) / 下载完成${NC}"
+    else
+         echo -e "${RED}Download failed! / 下载失败!${NC}"
+         exit 1
+    fi
+fi
+
+echo ""
+
+# Extract binary / 解压二进制文件
+echo -e "${YELLOW}[3/6] Extracting files... / 解压文件...${NC}"
+tar -xzf xray-lite.tar.gz
+rm xray-lite.tar.gz
+chmod +x vless-server keygen
+echo -e "${GREEN}✓ Files extracted / 文件已解压${NC}"
+echo ""
+
+# Generate configuration / 生成配置
+echo -e "${YELLOW}[4/6] Generating configuration... / 生成配置...${NC}"
+
+# Generate keys / 生成密钥
+echo "Generating X25519 key pair... / 生成 X25519 密钥对..."
+KEYGEN_OUTPUT=$(./keygen)
+PRIVATE_KEY=$(echo "$KEYGEN_OUTPUT" | grep "Private key:" | awk '{print $3}')
+PUBLIC_KEY=$(echo "$KEYGEN_OUTPUT" | grep "Public key:" | awk '{print $3}')
+
+# Generate UUID / 生成 UUID
+CLIENT_UUID=$(cat /proc/sys/kernel/random/uuid)
+
+# Get server IP / 获取服务器 IP
+SERVER_IP=$(curl -s ifconfig.me 2>/dev/null || curl -s ip.sb 2>/dev/null || echo "YOUR_SERVER_IP")
+
+# Interactive configuration / 交互式配置
+echo ""
+if [ -t 0 ]; then
+    read -p "Server port / 服务器端口 [443]: " PORT_INPUT
+    PORT=${PORT_INPUT:-443}
+else
+    PORT=443
+    echo "Non-interactive mode detected using default port 443 / 检测到非交互模式，使用默认端口 443"
+fi
+
+if [[ ! "$PORT" =~ ^[0-9]+$ ]]; then
+    echo -e "${YELLOW}Invalid port, using default 443 / 端口无效，使用默认 443${NC}"
+    PORT=443
+fi
+
+if [ -t 0 ]; then
+    read -p "Masquerade website / 伪装网站 [www.microsoft.com:443]: " DEST_INPUT
+    DEST=${DEST_INPUT:-www.microsoft.com:443}
+else
+    DEST="www.microsoft.com:443"
+fi
 
 DOMAIN=$(echo $DEST | cut -d: -f1)
 
-# Short ID configuration / Short ID 配置
-# Generate a random 8-byte (16 hex chars) Short ID for Reality verification
-# 生成随机 8 字节 Short ID 用于 Reality 验证
+# Short ID configuration
 if command -v openssl &> /dev/null; then
     SHORT_ID=$(openssl rand -hex 8)
 else
-    # Fallback if openssl missing
     SHORT_ID=$(cat /proc/sys/kernel/random/uuid | tr -d '-' | head -c 16)
 fi
 
-# Create server configuration / 创建服务器配置
+# Create server configuration
 cat > config.json << EOF
 {
   "log": {
@@ -87,7 +216,7 @@ cat > config.json << EOF
 }
 EOF
 
-# Create client configuration / 创建客户端配置
+# Create client configuration
 cat > client-config.json << EOF
 {
   "log": {"loglevel": "info"},
@@ -126,14 +255,14 @@ cat > client-config.json << EOF
 }
 EOF
 
-# Set permissions explicitly / 显式设置权限
+# Set permissions
 echo -e "${YELLOW}Setting permissions... / 设置权限...${NC}"
 chown -R nobody:nogroup $INSTALL_DIR
 chmod 755 $INSTALL_DIR
 chmod 644 $INSTALL_DIR/config.json
 chmod 755 $INSTALL_DIR/vless-server
 
-# Install systemd service / 安装 systemd 服务
+# Install systemd service
 echo -e "${YELLOW}[5/6] Installing systemd service... / 安装 systemd 服务...${NC}"
 
 cat > /etc/systemd/system/xray-lite.service << EOF
@@ -151,13 +280,6 @@ ExecStart=$INSTALL_DIR/vless-server --config $INSTALL_DIR/config.json
 Restart=on-failure
 RestartSec=10s
 
-# Security hardening disabled for compatibility
-# NoNewPrivileges=true
-# PrivateTmp=true
-# ProtectSystem=strict
-# ProtectHome=true
-# ReadWritePaths=$INSTALL_DIR
-
 LimitNOFILE=1000000
 LimitNPROC=512
 
@@ -174,7 +296,7 @@ systemctl enable xray-lite
 echo -e "${GREEN}✓ Service installed / 服务已安装${NC}"
 echo ""
 
-# Configure firewall / 配置防火墙
+# Configure firewall
 echo -e "${YELLOW}[6/6] Configuring firewall... / 配置防火墙...${NC}"
 # Ensure PORT is numeric again just in case
 if [[ ! "$PORT" =~ ^[0-9]+$ ]]; then
@@ -182,7 +304,6 @@ if [[ ! "$PORT" =~ ^[0-9]+$ ]]; then
 fi
 
 if command -v ufw &> /dev/null; then
-    # Check if ufw is active
     if ufw status | grep -q "Status: active"; then
         ufw allow $PORT/tcp
         echo -e "${GREEN}✓ Firewall configured (ufw) / 防火墙已配置 (ufw)${NC}"
@@ -199,7 +320,7 @@ else
 fi
 echo ""
 
-# Check port availability / 检查端口占用
+# Check port availability
 if lsof -i:$PORT -t >/dev/null 2>&1 ; then
     echo "Port $PORT is in use, attempting to clean up... / 端口 $PORT 被占用，尝试清理..."
     systemctl stop xray-lite >/dev/null 2>&1 || true
@@ -209,9 +330,6 @@ fi
 
 if lsof -i:$PORT -t >/dev/null 2>&1 ; then
     echo -e "${RED}Error: Port $PORT is already in use! / 错误: 端口 $PORT 已被占用!${NC}"
-    echo "Please stop the process using port $PORT or choose a different port."
-    echo "请停止占用端口 $PORT 的进程或选择其他端口。"
-    lsof -i:$PORT
     exit 1
 fi
 if ss -tuln | grep -q ":$PORT " ; then
@@ -219,7 +337,7 @@ if ss -tuln | grep -q ":$PORT " ; then
     exit 1
 fi
 
-# Start service / 启动服务
+# Start service
 echo -e "${YELLOW}Starting Xray-Lite service... / 启动 Xray-Lite 服务...${NC}"
 systemctl start xray-lite
 sleep 2
@@ -235,7 +353,7 @@ else
 fi
 echo ""
 
-# Display summary / 显示总结
+# Display summary
 echo -e "${GREEN}=========================================${NC}"
 echo -e "${GREEN}  Installation Complete! / 安装完成！${NC}"
 echo -e "${GREEN}=========================================${NC}"
