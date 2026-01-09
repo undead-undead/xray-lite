@@ -115,6 +115,11 @@ impl Server {
         loop {
             match listener.accept().await {
                 Ok((stream, addr)) => {
+                    // 优化 TCP socket 设置
+                    if let Err(e) = stream.set_nodelay(true) {
+                        error!("设置 TCP_NODELAY 失败: {}", e);
+                    }
+                    
                     info!("📥 新连接来自: {}", addr);
 
                     let codec = codec.clone();
@@ -184,6 +189,12 @@ impl Server {
             Command::Tcp => {
                 // 连接到目标服务器
                 let remote_stream = TcpStream::connect(request.address.to_string()).await?;
+                
+                // 优化远程连接的 TCP 设置
+                if let Err(e) = remote_stream.set_nodelay(true) {
+                    error!("设置远程 TCP_NODELAY 失败: {}", e);
+                }
+                
                 info!("🔗 已连接到远程: {}", request.address.to_string());
 
                 // 开始双向转发
