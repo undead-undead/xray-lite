@@ -161,10 +161,28 @@ impl Server {
             Box::new(stream)
         };
 
-        // 读取 VLESS 请求
+        // 读取 VLESS 请求（带超时，支持多次读取）
         let mut buf = bytes::BytesMut::with_capacity(4096);
         use tokio::io::AsyncReadExt;
-        stream.read_buf(&mut buf).await?;
+        use tokio::time::{timeout, Duration};
+        
+        // 第一次读取，5秒超时
+        let read_result = timeout(Duration::from_secs(5), stream.read_buf(&mut buf)).await;
+        
+        match read_result {
+            Ok(Ok(0)) => {
+                info!("客户端在发送VLESS请求前关闭了连接");
+                return Ok(());
+            },
+            Ok(Ok(n)) => {
+                info!("📦 读取了 {} 字节的 VLESS 数据", n);
+            },
+            Ok(Err(e)) => return Err(e.into()),
+            Err(_) => {
+                error!("读取 VLESS 请求超时");
+                return Err(anyhow::anyhow!("Read timeout"));
+            }
+        }
 
         let request = match codec.decode_request(&mut buf) {
             Ok(req) => req,
