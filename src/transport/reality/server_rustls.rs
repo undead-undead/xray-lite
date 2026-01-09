@@ -60,7 +60,7 @@ impl RealityServerRustls {
         }
 
         let needed = if buffer[0] == 0x16 { 5 + u16::from_be_bytes([buffer[3], buffer[4]]) as usize } else { buffer.len() };
-        while buffer.len() < needed && buffer.len() < 16383 {
+        while buffer.len() < needed && buffer.len() < 16384 {
              let mut chunk = [0u8; 1024];
              let n = stream.read(&mut chunk).await?;
              if n == 0 { break; }
@@ -69,20 +69,20 @@ impl RealityServerRustls {
 
         if let Ok(Some(info)) = hello_parser::parse_client_hello(&buffer) {
             if let Some((offset, auth_key)) = self.verify_client_reality(&info, &buffer) {
-                // Determine destination host for SNI
                 let dest_str = self.reality_config.dest.as_deref().unwrap_or("www.microsoft.com");
                 let dest_host = dest_str.split(':').next().unwrap_or("www.microsoft.com");
 
-                info!("Reality: Verified client (Offset {}), using session AuthKey for signature-cert", offset);
+                info!("Reality: Verified client (Offset {}), generating dynamic signature-certificate", offset);
                 
-                // Generate Dynamic Identity Certificate (Ed25519)
                 let (cert, key) = self.generate_reality_cert(&auth_key, dest_host)?;
 
                 let mut conn_reality_config = (*self.reality_config).clone();
                 conn_reality_config.private_key = auth_key.to_vec();
                 conn_reality_config.verify_client = false; 
 
-                let mut config = ServerConfig::builder()
+                // Explicitly use the ring provider to ensure Ed25519 support
+                let mut config = ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+                    .with_safe_default_protocol_versions()?
                     .with_no_client_auth()
                     .with_single_cert(vec![cert], key)
                     .map_err(|e| anyhow!("Config build fail: {}", e))?;
@@ -147,7 +147,6 @@ impl RealityServerRustls {
     fn generate_reality_cert(&self, auth_key: &[u8; 32], host: &str) -> Result<(CertificateDer<'static>, PrivateKeyDer<'static>)> {
         use rcgen::{CertificateParams, KeyPair, PKCS_ED25519};
 
-        // Standard Reality requires an Ed25519 Identity for auth
         let key_pair = KeyPair::generate(&PKCS_ED25519).map_err(|e| anyhow!("Key generation fail: {}", e))?;
         let mut params = CertificateParams::new(vec![host.to_string()]);
         params.alg = &PKCS_ED25519;
@@ -157,17 +156,19 @@ impl RealityServerRustls {
         let mut cert_der = cert.serialize_der().map_err(|e| anyhow!("Cert serialization fail: {}", e))?;
         let priv_key_der = cert.serialize_private_key_der();
         
-        // Precisely find SubjectPublicKey (last 32 bytes of the BIT STRING in SPKI)
-        // In Ed25519 SPKI, the public key is exactly 32 bytes at the end.
-        let pub_key_raw = &cert.get_key_pair().public_key_raw();
+        // Search for Ed25519 public key in SPKI (0x03 0x21 0x00 is the BIT STRING header for 32 bytes)
+        let pub_key_raw = if let Some(pos) = cert_der.windows(3).position(|w| w == &[0x03, 0x21, 0x00]) {
+            &cert_der[pos+3..pos+35]
+        } else {
+            bail!("Could not find public key in cert DER");
+        };
 
-        // Calculate Dynamic Signature: HMAC-SHA512(AuthKey, RawPublicKey)
+        // Reality Signature: HMAC-SHA512(AuthKey, RawPublicKey)
         let ring_key = hmac::Key::new(hmac::HMAC_SHA512, auth_key);
         let signature = hmac::sign(&ring_key, pub_key_raw);
-        let sig_bytes = signature.as_ref(); // Always 64 bytes
+        let sig_bytes = signature.as_ref(); 
 
-        // Find the signature BIT STRING in the end of DER and overwrite it.
-        // For Ed25519, the signature is the very last 64 bytes (plus BIT STRING header 03 41 00)
+        // Overwrite the signature at the end of DER (BIT STRING 03 41 00 followed by 64 bytes)
         let total_len = cert_der.len();
         if total_len > 67 {
              cert_der[total_len-64..].copy_from_slice(sig_bytes);
