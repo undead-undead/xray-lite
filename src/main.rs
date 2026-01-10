@@ -9,6 +9,7 @@ mod protocol;
 mod server;
 mod transport;
 mod utils;
+mod handler;
 
 use crate::config::Config;
 use crate::server::Server;

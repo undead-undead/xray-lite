@@ -19,9 +19,11 @@ impl H2Handler {
     }
 
     /// 处理 HTTP/2 连接
-    pub async fn handle<T>(&self, stream: T) -> Result<()>
+    pub async fn handle<T, F, Fut>(&self, stream: T, handler: F) -> Result<()>
     where
         T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+        F: Fn(Box<dyn crate::server::AsyncStream>) -> Fut + Clone + Send + Sync + 'static,
+        Fut: std::future::Future<Output = Result<()>> + Send + 'static,
     {
         info!("开始处理 HTTP/2 连接");
 
@@ -34,10 +36,11 @@ impl H2Handler {
             match result {
                 Ok((request, respond)) => {
                     let config = self.config.clone();
+                    let handler = handler.clone();
                     
                     // 为每个请求生成一个任务
                     tokio::spawn(async move {
-                        if let Err(e) = Self::handle_request(config, request, respond).await {
+                        if let Err(e) = Self::handle_request(config, request, respond, handler).await {
                             warn!("处理请求失败: {}", e);
                         }
                     });
@@ -54,11 +57,16 @@ impl H2Handler {
     }
 
     /// 处理单个 HTTP/2 请求
-    async fn handle_request(
+    async fn handle_request<F, Fut>(
         config: XhttpConfig,
         request: Request<h2::RecvStream>,
         mut respond: SendResponse<Bytes>,
-    ) -> Result<()> {
+        handler: F,
+    ) -> Result<()>
+    where
+        F: Fn(Box<dyn crate::server::AsyncStream>) -> Fut + Clone + Send + 'static,
+        Fut: std::future::Future<Output = Result<()>> + Send + 'static,
+    {
         let path = request.uri().path();
         let method = request.method();
 
@@ -91,19 +99,19 @@ impl H2Handler {
             "auto" => {
                 // 自动选择：根据请求方法判断
                 if method == "POST" {
-                    Self::handle_stream_up(request, respond).await?;
+                    Self::handle_stream_up(request, respond, handler).await?;
                 } else {
-                    Self::handle_stream_down(request, respond).await?;
+                    Self::handle_stream_down(request, respond, handler).await?;
                 }
             }
             "stream-up" => {
-                Self::handle_stream_up(request, respond).await?;
+                Self::handle_stream_up(request, respond, handler).await?;
             }
             "stream-down" => {
-                Self::handle_stream_down(request, respond).await?;
+                Self::handle_stream_down(request, respond, handler).await?;
             }
             "stream-one" => {
-                Self::handle_stream_one(request, respond).await?;
+                Self::handle_stream_one(request, respond, handler).await?;
             }
             _ => {
                 warn!("未知模式: {}", config.mode);
@@ -114,89 +122,104 @@ impl H2Handler {
         Ok(())
     }
 
-    /// 处理 stream-up 模式 (上传流)
-    async fn handle_stream_up(
+    /// 处理 stream-up 模式 (上传流 - VLESS via gRPC)
+    async fn handle_stream_up<F, Fut>(
         mut request: Request<h2::RecvStream>,
         mut respond: SendResponse<Bytes>,
-    ) -> Result<()> {
+        handler: F,
+    ) -> Result<()>
+    where
+        F: Fn(Box<dyn crate::server::AsyncStream>) -> Fut + Clone + Send + 'static,
+        Fut: std::future::Future<Output = Result<()>> + Send + 'static,
+    {
         debug!("处理 stream-up 模式");
 
-        // 发送 gRPC 响应头 (伪装)
         let response = Response::builder()
             .status(StatusCode::OK)
             .header("content-type", "application/grpc")
             .header("grpc-encoding", "identity")
-            .header("grpc-accept-encoding", "gzip")
             .body(())
             .map_err(|e| anyhow!("构建响应失败: {}", e))?;
 
         let mut send_stream = respond.send_response(response, false)?;
-        debug!("已发送 gRPC 响应头");
+        let (client_io, server_io) = tokio::io::duplex(8192);
+        tokio::spawn(handler(Box::new(server_io)));
+        let (mut client_read, mut client_write) = tokio::io::split(client_io);
 
-        // 接收客户端上传的数据
-        let mut body = request.body_mut();
-        let mut total_bytes = 0;
-
-        while let Some(chunk) = body.data().await {
-            match chunk {
-                Ok(data) => {
-                    total_bytes += data.len();
-                    debug!("收到数据块: {} 字节", data.len());
+        let up_task = async move {
+            let mut body = request.body_mut();
+            let mut buf = bytes::BytesMut::new();
+            use tokio::io::AsyncWriteExt;
+            
+            while let Some(chunk_res) = body.data().await {
+                let chunk = chunk_res?;
+                let _ = body.flow_control().release_capacity(chunk.len());
+                buf.extend_from_slice(&chunk);
+                
+                while buf.len() >= 5 {
+                    let len = u32::from_be_bytes([buf[1], buf[2], buf[3], buf[4]]) as usize;
+                    if buf.len() < 5 + len { break; }
                     
-                    // 释放流量控制窗口
-                    let _ = body.flow_control().release_capacity(data.len());
+                    let frame_len = 5 + len;
+                    let data = buf[5..frame_len].to_vec();
+                    let _ = buf.split_to(frame_len); // Advance
                     
-                    // TODO: 这里应该处理实际的 VLESS 数据
-                    // 目前只是接收并丢弃
-                }
-                Err(e) => {
-                    warn!("接收数据失败: {}", e);
-                    break;
+                    if !data.is_empty() {
+                        client_write.write_all(&data).await?;
+                    }
                 }
             }
-        }
+            Ok::<(), anyhow::Error>(())
+        };
 
-        info!("stream-up 完成，总共接收: {} 字节", total_bytes);
+        let down_task = async move {
+            let mut buf = vec![0u8; 8192];
+            use tokio::io::AsyncReadExt;
+            loop {
+                let n = client_read.read(&mut buf).await?;
+                if n == 0 { break; }
+                
+                let msg = super::grpc::GrpcMessage::new(buf[..n].to_vec());
+                send_stream.send_data(msg.encode(), false)?;
+            }
+            // 发送 Trailer
+            // 简单的 GRPC-Status: 0 trailer 在 send_response 时很难发送，h2 trait 需要 send_trailers
+            // 这里我们简化，直接结束流
+            send_stream.send_data(Bytes::new(), true)?;
+            Ok::<(), anyhow::Error>(())
+        };
 
-        // 发送 gRPC 结束标记
-        send_stream.send_data(Bytes::from_static(b"\x00\x00\x00\x00\x00"), true)?;
-
+        let _ = tokio::join!(up_task, down_task);
+        info!("stream-up 完成");
         Ok(())
     }
 
-    /// 处理 stream-down 模式 (下载流)
-    async fn handle_stream_down(
-        _request: Request<h2::RecvStream>,
+    /// 处理 stream-down 模式 (下载流 - VLESS via gRPC)
+    async fn handle_stream_down<F, Fut>(
+        request: Request<h2::RecvStream>,
         mut respond: SendResponse<Bytes>,
-    ) -> Result<()> {
-        debug!("处理 stream-down 模式");
-
-        // 发送 gRPC 响应头
-        let response = Response::builder()
-            .status(StatusCode::OK)
-            .header("content-type", "application/grpc")
-            .header("grpc-encoding", "identity")
-            .body(())
-            .map_err(|e| anyhow!("构建响应失败: {}", e))?;
-
-        let mut send_stream = respond.send_response(response, false)?;
-
-        // TODO: 这里应该发送实际的 VLESS 数据
-        // 目前发送一个空的 gRPC 消息
-        send_stream.send_data(Bytes::from_static(b"\x00\x00\x00\x00\x00"), true)?;
-
-        info!("stream-down 完成");
-        Ok(())
+        handler: F,
+    ) -> Result<()>
+    where
+        F: Fn(Box<dyn crate::server::AsyncStream>) -> Fut + Clone + Send + 'static,
+        Fut: std::future::Future<Output = Result<()>> + Send + 'static,
+    {
+        // 实际上与 stream-up 逻辑几乎一样，只是方向意图不同，但 VLESS 是双向的
+        Self::handle_stream_up(request, respond, handler).await
     }
 
-    /// 处理 stream-one 模式 (单向流)
-    async fn handle_stream_one(
-        _request: Request<h2::RecvStream>,
+    /// 处理 stream-one 模式 (单向流 - VLESS via Raw Body)
+    async fn handle_stream_one<F, Fut>(
+        mut request: Request<h2::RecvStream>,
         mut respond: SendResponse<Bytes>,
-    ) -> Result<()> {
+        handler: F,
+    ) -> Result<()>
+    where
+        F: Fn(Box<dyn crate::server::AsyncStream>) -> Fut + Clone + Send + 'static,
+        Fut: std::future::Future<Output = Result<()>> + Send + 'static,
+    {
         debug!("处理 stream-one 模式");
 
-        // 发送简单的 HTTP/2 响应
         let response = Response::builder()
             .status(StatusCode::OK)
             .header("content-type", "application/octet-stream")
@@ -204,10 +227,34 @@ impl H2Handler {
             .map_err(|e| anyhow!("构建响应失败: {}", e))?;
 
         let mut send_stream = respond.send_response(response, false)?;
+        let (client_io, server_io) = tokio::io::duplex(8192);
+        tokio::spawn(handler(Box::new(server_io)));
+        let (mut client_read, mut client_write) = tokio::io::split(client_io);
 
-        // TODO: 发送实际数据
-        send_stream.send_data(Bytes::from_static(b"OK"), true)?;
+        let up_task = async move {
+            let mut body = request.body_mut();
+            use tokio::io::AsyncWriteExt;
+            while let Some(chunk_res) = body.data().await {
+                let chunk = chunk_res?;
+                let _ = body.flow_control().release_capacity(chunk.len());
+                client_write.write_all(&chunk).await?;
+            }
+            Ok::<(), anyhow::Error>(())
+        };
 
+        let down_task = async move {
+            let mut buf = vec![0u8; 8192];
+            use tokio::io::AsyncReadExt;
+            loop {
+                let n = client_read.read(&mut buf).await?;
+                if n == 0 { break; }
+                send_stream.send_data(Bytes::copy_from_slice(&buf[..n]), false)?;
+            }
+            send_stream.send_data(Bytes::new(), true)?;
+            Ok::<(), anyhow::Error>(())
+        };
+
+        let _ = tokio::join!(up_task, down_task);
         info!("stream-one 完成");
         Ok(())
     }
