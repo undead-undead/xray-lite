@@ -140,10 +140,8 @@ impl H2Handler {
 
         let response = Response::builder()
             .status(StatusCode::OK)
-            .header("content-type", "text/event-stream")
-            .header("cache-control", "no-store")
-            .header("x-accel-buffering", "no")
-            .header("access-control-allow-origin", "*")
+            .header("content-type", "application/grpc")
+            .header("grpc-encoding", "identity")
             .header("x-padding", padding)
             .body(())
             .map_err(|e| anyhow!("构建响应失败: {}", e))?;
@@ -153,50 +151,21 @@ impl H2Handler {
         tokio::spawn(handler(Box::new(server_io)));
         let (mut client_read, mut client_write) = tokio::io::split(client_io);
 
-        let mut client_write = client_write;
-
         let up_task = async move {
-            info!("🚀 Up task started - waiting for body data");
-            let mut body = request.body_mut();
-            let mut buf = bytes::BytesMut::new();
-            use tokio::io::AsyncWriteExt;
-            
-            loop {
-                let chunk_future = body.data();
-                
-                tokio::select! {
-                    res = chunk_future => {
-                        match res {
-                            Some(Ok(chunk)) => {
-                                info!("✅ XHTTP 收到数据块: {} 字节", chunk.len());
-                                let _ = body.flow_control().release_capacity(chunk.len());
-                                
-                                if chunk.len() > 0 {
-                                    let dump_len = std::cmp::min(chunk.len(), 32);
-                                    info!("📦 Hex Dump (Head): {}", hex::encode(&chunk[..dump_len]));
-                                }
-
-                                // 直接直通写入管道，不尝试解析 gRPC
-                                // 让后端的 VLESS Codec 去处理（如果格式不对会报错并打印数据，这样我们就能看到原始数据了）
-                                client_write.write_all(&chunk).await?;
-                                info!("➡️ 已转发 {} 字节到 VLESS Handler", chunk.len());
-                            }
-                            Some(Err(e)) => {
-                                error!("❌ 读取 Body 错误: {}", e);
-                                break;
-                            }
-                            None => {
-                                info!("🏁 Body stream ended (EOF)");
-                                break;
-                            }
-                        }
+            let mut body = request.into_body();
+            while let Some(chunk_result) = body.data().await {
+                match chunk_result {
+                    Ok(chunk) => {
+                         let _ = body.flow_control().release_capacity(chunk.len());
+                         use tokio::io::AsyncWriteExt;
+                         client_write.write_all(&chunk).await?;
                     }
-                    _ = tokio::time::sleep(std::time::Duration::from_millis(2000)) => {
-                        info!("💤 Up task waiting for data... (2s tick)");
+                    Err(e) => {
+                        debug!("XHTTP Body read error/closed: {}", e);
+                        break;
                     }
                 }
             }
-            info!("Up task finished loop");
             Ok::<(), anyhow::Error>(())
         };
 
