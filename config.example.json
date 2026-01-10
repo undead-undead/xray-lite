@@ -12,16 +12,19 @@
                         "email": "user@example.com"
                     }
                 ],
-                "decryption": "none"
+                "decryption": "none",
+                "sniffing": {
+                    "enabled": true,
+                    "destOverride": ["tls", "http"]
+                }
             },
             "streamSettings": {
                 "network": "tcp",
                 "security": "reality",
                 "realitySettings": {
-                    "dest": "www.apple.com:443",
+                    "dest": "www.microsoft.com:443",
                     "serverNames": [
-                        "www.apple.com",
-                        "*.apple.com"
+                        "www.microsoft.com"
                     ],
                     "privateKey": "your_private_key_here",
                     "publicKey": "your_public_key_here",
@@ -30,10 +33,10 @@
                     ],
                     "fingerprint": "chrome"
                 },
-                "xhttpSettings": {
-                    "mode": "stream-up",
-                    "path": "/",
-                    "host": "www.apple.com"
+                "sockopt": {
+                    "tcpFastOpen": false,
+                    "tcpNoDelay": true,
+                    "acceptProxyProtocol": false
                 }
             }
         }

@@ -38,6 +38,36 @@ pub struct InboundSettings {
     pub clients: Vec<Client>,
     #[serde(default = "default_decryption")]
     pub decryption: String,
+    #[serde(default)]
+    pub sniffing: SniffingConfig,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// 流量嗅探配置
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SniffingConfig {
+    /// 是否启用嗅探
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// 嗅探目标类型
+    #[serde(rename = "destOverride", default = "default_dest_override")]
+    pub dest_override: Vec<String>,
+}
+
+impl Default for SniffingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true, // 默认开启
+            dest_override: vec!["tls".to_string(), "http".to_string()],
+        }
+    }
+}
+
+fn default_dest_override() -> Vec<String> {
+    vec!["tls".to_string(), "http".to_string()]
 }
 
 fn default_decryption() -> String {
@@ -61,6 +91,32 @@ pub struct StreamSettings {
     pub reality_settings: Option<RealitySettings>,
     #[serde(rename = "xhttpSettings", skip_serializing_if = "Option::is_none")]
     pub xhttp_settings: Option<XhttpSettings>,
+    #[serde(default)]
+    pub sockopt: SockOpt,
+}
+
+/// Socket 选项配置
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SockOpt {
+    /// TCP Fast Open - 减少握手延迟
+    #[serde(rename = "tcpFastOpen", default)]
+    pub tcp_fast_open: bool,
+    /// TCP No Delay (禁用 Nagle 算法) - 减少小包延迟
+    #[serde(rename = "tcpNoDelay", default = "default_true")]
+    pub tcp_no_delay: bool,
+    /// 接受 Proxy Protocol (用于获取真实客户端 IP)
+    #[serde(rename = "acceptProxyProtocol", default)]
+    pub accept_proxy_protocol: bool,
+}
+
+impl Default for SockOpt {
+    fn default() -> Self {
+        Self {
+            tcp_fast_open: false,
+            tcp_no_delay: true, // 默认开启
+            accept_proxy_protocol: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

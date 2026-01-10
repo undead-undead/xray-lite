@@ -116,9 +116,14 @@ impl Server {
         loop {
             match listener.accept().await {
                 Ok((stream, addr)) => {
-                    // 优化 TCP socket 设置
-                    if let Err(e) = stream.set_nodelay(true) {
-                        error!("设置 TCP_NODELAY 失败: {}", e);
+                    // 获取 sockopt 配置
+                    let sockopt = &inbound.stream_settings.sockopt;
+                    
+                    // 应用 TCP No Delay 配置
+                    if sockopt.tcp_no_delay {
+                        if let Err(e) = stream.set_nodelay(true) {
+                            error!("设置 TCP_NODELAY 失败: {}", e);
+                        }
                     }
                     
                     info!("📥 新连接来自: {}", addr);
@@ -126,10 +131,12 @@ impl Server {
                     let codec = codec.clone();
                     let reality_server = reality_server.clone();
                     let connection_manager = connection_manager.clone();
+                    let sniffing_enabled = inbound.settings.sniffing.enabled;
+                    let tcp_no_delay = inbound.stream_settings.sockopt.tcp_no_delay;
 
                     tokio::spawn(async move {
                         if let Err(e) =
-                            Self::handle_client(stream, codec, reality_server, connection_manager)
+                            Self::handle_client(stream, codec, reality_server, connection_manager, sniffing_enabled, tcp_no_delay)
                                 .await
                         {
                             error!("客户端处理失败: {}", e);
@@ -153,6 +160,8 @@ impl Server {
         codec: VlessCodec,
         reality_server: Option<RealityServer>,
         connection_manager: ConnectionManager,
+        sniffing_enabled: bool,
+        tcp_no_delay: bool,
     ) -> Result<()> {
         // 如果配置了 Reality，执行握手
         let mut stream: Box<dyn AsyncStream> = if let Some(reality) = reality_server {
@@ -230,11 +239,11 @@ impl Server {
                 // 1. 先检查之前的缓冲区是否有剩余数据 (Header 和 Payload 一起发过来的情况)
                 if !buf.is_empty() {
                     initial_data.extend_from_slice(&buf);
-                    // buf 中的数据已经被转移到 initial_data，清空 buf 以免重复发送?
-                    // 注意：这里的 buf 是 bytes::BytesMut。 VlessCodec 应该已经 advance 了 Header 部分。
-                    // 剩下的就是 Payload。
                     buf.clear(); 
                 }
+
+                // 只有在启用嗅探时才执行嗅探逻辑
+                if sniffing_enabled {
 
                 // 2. 如果数据不够嗅探 (或为空)，再尝试从 stream 读取
                 // 即使有数据，如果 ClientHello 被分包了，也可能不够。TLS ClientHello 至少几十字节。
@@ -299,7 +308,7 @@ impl Server {
                         }
                     }
                 }
-                // --- 🌟 SNIFFING END ---
+                } // if sniffing_enabled
                 // --- 🌟 SNIFFING END ---
 
                 // 连接到目标服务器 (可能是原来的 IP，也可能是嗅探到的域名)
@@ -312,8 +321,10 @@ impl Server {
                 };
                 
                 // 优化远程连接的 TCP 设置
-                if let Err(e) = remote_stream.set_nodelay(true) {
-                    error!("设置远程 TCP_NODELAY 失败: {}", e);
+                if tcp_no_delay {
+                    if let Err(e) = remote_stream.set_nodelay(true) {
+                        error!("设置远程 TCP_NODELAY 失败: {}", e);
+                    }
                 }
                 
                 info!("🔗 已连接到远程: {}", target_address);
