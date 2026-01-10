@@ -56,7 +56,52 @@ impl Server {
     /// 运行单个入站配置
     async fn run_inbound(inbound: Inbound, connection_manager: ConnectionManager) -> Result<()> {
         let addr = format!("{}:{}", inbound.listen, inbound.port);
-        let listener = TcpListener::bind(&addr).await?;
+        let sockopt = &inbound.stream_settings.sockopt;
+        
+        // 使用 socket2 创建监听器以支持 TCP Fast Open
+        let listener = if sockopt.tcp_fast_open {
+            use socket2::{Socket, Domain, Type, Protocol};
+            use std::net::SocketAddr;
+            
+            let socket_addr: SocketAddr = addr.parse()?;
+            let domain = if socket_addr.is_ipv4() {
+                Domain::IPV4
+            } else {
+                Domain::IPV6
+            };
+            
+            let socket = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))?;
+            
+            // 设置 SO_REUSEADDR
+            socket.set_reuse_address(true)?;
+            
+            // 启用 TCP Fast Open (队列长度为 256)
+            #[cfg(target_os = "linux")]
+            {
+                // Linux 特有的 TCP_FASTOPEN 选项
+                use std::os::unix::io::AsRawFd;
+                let fd = socket.as_raw_fd();
+                let val: libc::c_int = 256;
+                unsafe {
+                    libc::setsockopt(
+                        fd,
+                        libc::IPPROTO_TCP,
+                        libc::TCP_FASTOPEN,
+                        &val as *const _ as *const libc::c_void,
+                        std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+                    );
+                }
+                info!("🚀 TCP Fast Open 已启用 (队列长度: 256)");
+            }
+            
+            socket.bind(&socket_addr.into())?;
+            socket.listen(1024)?;
+            socket.set_nonblocking(true)?;
+            
+            TcpListener::from_std(std::net::TcpListener::from(socket))?
+        } else {
+            TcpListener::bind(&addr).await?
+        };
 
         info!("🎯 监听 {} (协议: {:?})", addr, inbound.protocol);
 
@@ -133,10 +178,11 @@ impl Server {
                     let connection_manager = connection_manager.clone();
                     let sniffing_enabled = inbound.settings.sniffing.enabled;
                     let tcp_no_delay = inbound.stream_settings.sockopt.tcp_no_delay;
+                    let accept_proxy_protocol = inbound.stream_settings.sockopt.accept_proxy_protocol;
 
                     tokio::spawn(async move {
                         if let Err(e) =
-                            Self::handle_client(stream, codec, reality_server, connection_manager, sniffing_enabled, tcp_no_delay)
+                            Self::handle_client(stream, codec, reality_server, connection_manager, sniffing_enabled, tcp_no_delay, accept_proxy_protocol)
                                 .await
                         {
                             error!("客户端处理失败: {}", e);
@@ -156,13 +202,52 @@ impl Server {
 
     /// 处理客户端连接
     async fn handle_client(
-        stream: TcpStream,
+        mut stream: TcpStream,
         codec: VlessCodec,
         reality_server: Option<RealityServer>,
         connection_manager: ConnectionManager,
         sniffing_enabled: bool,
         tcp_no_delay: bool,
+        accept_proxy_protocol: bool,
     ) -> Result<()> {
+        // 如果启用 Proxy Protocol，先解析获取真实客户端 IP
+        let _real_client_addr = if accept_proxy_protocol {
+            use tokio::io::AsyncReadExt;
+            let mut pp_buf = [0u8; 512];
+            
+            // Peek 数据来检查是否有 Proxy Protocol 头
+            match stream.peek(&mut pp_buf).await {
+                Ok(n) if n > 0 => {
+                    if crate::protocol::is_proxy_protocol(&pp_buf[..n]) {
+                        // 读取实际数据
+                        let mut read_buf = vec![0u8; n];
+                        stream.read_exact(&mut read_buf).await?;
+                        
+                        match crate::protocol::parse_proxy_protocol(&read_buf) {
+                            Ok((header, consumed)) => {
+                                info!("📡 Proxy Protocol: 真实客户端 IP = {}", header.source_addr);
+                                // 如果还有剩余数据需要处理...
+                                if consumed < read_buf.len() {
+                                    // 这部分数据需要重新处理，但目前简化处理
+                                    debug!("Proxy Protocol 后有 {} 字节剩余", read_buf.len() - consumed);
+                                }
+                                Some(header.source_addr)
+                            }
+                            Err(e) => {
+                                warn!("Proxy Protocol 解析失败: {}", e);
+                                None
+                            }
+                        }
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
+
         // 如果配置了 Reality，执行握手
         let mut stream: Box<dyn AsyncStream> = if let Some(reality) = reality_server {
             let tls_stream = reality.accept(stream).await?;

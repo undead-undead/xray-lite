@@ -49,6 +49,8 @@ thiserror = "1.0"
 # 网络工具
 bytes = "1.5"
 futures = "0.3"
+socket2 = { version = "0.5", features = ["all"] }
+libc = "0.2"
 
 # 其他
 clap = { version = "4.4", features = ["derive"] }

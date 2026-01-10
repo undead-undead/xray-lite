@@ -50,7 +50,7 @@ fn default_true() -> bool {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SniffingConfig {
     /// 是否启用嗅探
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub enabled: bool,
     /// 嗅探目标类型
     #[serde(rename = "destOverride", default = "default_dest_override")]
@@ -60,7 +60,7 @@ pub struct SniffingConfig {
 impl Default for SniffingConfig {
     fn default() -> Self {
         Self {
-            enabled: true, // 默认开启
+            enabled: false, // 默认关闭
             dest_override: vec!["tls".to_string(), "http".to_string()],
         }
     }
@@ -99,7 +99,7 @@ pub struct StreamSettings {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SockOpt {
     /// TCP Fast Open - 减少握手延迟
-    #[serde(rename = "tcpFastOpen", default)]
+    #[serde(rename = "tcpFastOpen", default = "default_true")]
     pub tcp_fast_open: bool,
     /// TCP No Delay (禁用 Nagle 算法) - 减少小包延迟
     #[serde(rename = "tcpNoDelay", default = "default_true")]
@@ -112,9 +112,9 @@ pub struct SockOpt {
 impl Default for SockOpt {
     fn default() -> Self {
         Self {
-            tcp_fast_open: false,
-            tcp_no_delay: true, // 默认开启
-            accept_proxy_protocol: false,
+            tcp_fast_open: true,          // 默认开启
+            tcp_no_delay: true,           // 默认开启
+            accept_proxy_protocol: false, // 默认关闭
         }
     }
 }

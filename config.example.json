@@ -14,8 +14,11 @@
                 ],
                 "decryption": "none",
                 "sniffing": {
-                    "enabled": true,
-                    "destOverride": ["tls", "http"]
+                    "enabled": false,
+                    "destOverride": [
+                        "tls",
+                        "http"
+                    ]
                 }
             },
             "streamSettings": {
@@ -34,7 +37,7 @@
                     "fingerprint": "chrome"
                 },
                 "sockopt": {
-                    "tcpFastOpen": false,
+                    "tcpFastOpen": true,
                     "tcpNoDelay": true,
                     "acceptProxyProtocol": false
                 }
