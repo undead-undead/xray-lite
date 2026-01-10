@@ -92,7 +92,7 @@ impl Server {
                         std::mem::size_of::<libc::c_int>() as libc::socklen_t,
                     );
                 }
-                info!("🚀 TCP Fast Open 已启用 (队列长度: 256)");
+                info!("🚀 TCP Fast Open 已启用 (队列长度: 256) [Build 41]");
             }
             
             socket.bind(&socket_addr.into())?;
