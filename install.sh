@@ -19,7 +19,7 @@ BLUE='\033[0;34m'
 NC='\033[0m'
 
 # Version / 版本
-VERSION="v0.2.42-perfect"
+VERSION="v0.2.43-friendly"
 REPO="undead-undead/xray-lite"
 
 echo -e "${BLUE}=========================================${NC}"
@@ -223,6 +223,10 @@ if [ -t 0 ]; then
         
         read -p "XHTTP path / XHTTP 路径 [/]: " PATH_INPUT
         XHTTP_PATH=${PATH_INPUT:-/}
+        # Auto-prepend / if missing
+        if [[ "$XHTTP_PATH" != /* ]]; then
+            XHTTP_PATH="/$XHTTP_PATH"
+        fi
         
         read -p "XHTTP host / XHTTP 域名 (Optional/可选) []: " HOST_INPUT
         XHTTP_HOST=${HOST_INPUT}
