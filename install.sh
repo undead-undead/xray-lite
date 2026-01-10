@@ -224,9 +224,13 @@ if [ -t 0 ]; then
         read -p "XHTTP path / XHTTP 路径 [/]: " PATH_INPUT
         XHTTP_PATH=${PATH_INPUT:-/}
         
+        read -p "XHTTP host / XHTTP 域名 (Optional/可选) []: " HOST_INPUT
+        XHTTP_HOST=${HOST_INPUT}
+
         echo -e "${GREEN}✓ XHTTP enabled / XHTTP 已启用${NC}"
         echo "  Mode / 模式: $XHTTP_MODE"
         echo "  Path / 路径: $XHTTP_PATH"
+        echo "  Host / 域名: ${XHTTP_HOST:-*(Any)}"
     else
         echo -e "${GREEN}✓ Using TCP (default) / 使用 TCP (默认)${NC}"
     fi
@@ -239,7 +243,7 @@ if [ "$ENABLE_XHTTP" = "y" ]; then
         \"xhttpSettings\": {
           \"mode\": \"$XHTTP_MODE\",
           \"path\": \"$XHTTP_PATH\",
-          \"host\": \"$DOMAIN\"
+          \"host\": \"$XHTTP_HOST\"
         }"
 else
     XHTTP_SETTINGS=""
