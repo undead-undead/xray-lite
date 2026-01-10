@@ -33,3 +33,6 @@ config.json
 # 临时文件
 *.tmp
 *.temp
+gh
+*.log
+*.backup
