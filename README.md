@@ -4,7 +4,7 @@
 [![Rust](https://img.shields.io/badge/rust-1.70%2B-orange.svg)](https://www.rust-lang.org/)
 [![Buy Me A Coffee](https://img.shields.io/badge/Buy%20Me%20A%20Coffee-Support-orange?style=flat&logo=buy-me-a-coffee)](https://buymeacoffee.com/undeadundead)
 
-[English](#xray-lite) | [中文](#chinese-documentation)
+**English** | **中文** (Bilingual / 双语文档)
 
 A lightweight, high-performance VLESS + Reality proxy server implemented in pure Rust. Fully compatible with all Xray/V2Ray clients.
 
@@ -228,14 +228,6 @@ MIT License - See [LICENSE](LICENSE) for details.
 - [Xray-core](https://github.com/XTLS/Xray-core) - Reality protocol design / Reality 协议设计
 - [Tokio](https://tokio.rs/) - Async runtime / 异步运行时
 - [rustls](https://github.com/rustls/rustls) - TLS implementation / TLS 实现
-
----
-
-<a id="chinese-documentation"></a>
-
-## 中文文档 / Chinese Documentation
-
-请参阅上方双语内容。如需纯中文文档，请查看 [USAGE.md](USAGE.md)。
 
 ---
 
