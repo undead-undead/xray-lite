@@ -73,35 +73,17 @@ impl H2Handler {
         debug!("收到请求: {} {}", method, path);
 
         // 验证路径
-        // 验证路径
-        // XHTTP 协议中，请求路径可能是 /path/UUID，所以只能匹配前缀
-        let matches = if config.path == "/" {
-            true 
-        } else {
-            // 确保是前缀匹配，且边界正确（例如 /path 不能匹配 /path2，但可以匹配 /path/uuid）
-            path == config.path || (path.starts_with(&config.path) && path.chars().nth(config.path.len()) == Some('/'))
-        };
-
-        if !matches {
+        // 验证路径 (简化版：只检查前缀)
+        // 只要请求路径以配置的路径开头即可，不再严格校验后续字符
+        // 这能最大限度保证兼容性，哪怕配置是 /path 而请求是 /pathSometing (极少见) 也能通
+        if !path.starts_with(&config.path) {
             warn!("路径不匹配: {} (Config: {})", path, config.path);
             Self::send_error_response(&mut respond, StatusCode::NOT_FOUND).await?;
             return Ok(());
         }
 
-        // 验证 Host 头 (如果配置了 Host)
-        if !config.host.is_empty() {
-            if let Some(host) = request.headers().get("host") {
-                if let Ok(host_str) = host.to_str() {
-                    // 简单的 Host 匹配 (不包含端口)
-                    let host_only = host_str.split(':').next().unwrap_or(host_str);
-                    if host_only != config.host && host_str != config.host {
-                        warn!("Host 不匹配: {} != {}", host_str, config.host);
-                        Self::send_error_response(&mut respond, StatusCode::BAD_REQUEST).await?;
-                        return Ok(());
-                    }
-                }
-            }
-        }
+        // Host 校验已移除，因为 Reality/TLS 已经提供了足够的安全性，且 CDN/SNI 场景下 Host 可能不一致
+        // if !config.host.is_empty() { ... }
 
         // 根据模式处理
         match config.mode.as_str() {
