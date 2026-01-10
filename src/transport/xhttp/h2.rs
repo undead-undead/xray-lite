@@ -165,33 +165,14 @@ impl H2Handler {
                                 let _ = body.flow_control().release_capacity(chunk.len());
                                 
                                 if chunk.len() > 0 {
-                                    let dump_len = std::cmp::min(chunk.len(), 16);
-                                    info!("📦 Hex Dump: {}", hex::encode(&chunk[..dump_len]));
+                                    let dump_len = std::cmp::min(chunk.len(), 32);
+                                    info!("📦 Hex Dump (Head): {}", hex::encode(&chunk[..dump_len]));
                                 }
 
-                                buf.extend_from_slice(&chunk);
-                                
-                                // Gprc processing logic...
-                                while buf.len() >= 5 {
-                                    let compressed_flag = buf[0];
-                                    let len = u32::from_be_bytes([buf[1], buf[2], buf[3], buf[4]]) as usize;
-                                    
-                                    info!("🔍 尝试解析 gRPC: flag={} len={} (buf_len={})", compressed_flag, len, buf.len());
-
-                                    if buf.len() < 5 + len { 
-                                        debug!("⏳ 数据包不完整，等待更多数据...");
-                                        break; 
-                                    }
-                                    
-                                    let frame_len = 5 + len;
-                                    let data = buf[5..frame_len].to_vec();
-                                    let _ = buf.split_to(frame_len); // Advance
-                                    
-                                    if !data.is_empty() {
-                                         debug!("📤 提取有效载荷: {} 字节", data.len());
-                                        client_write.write_all(&data).await?;
-                                    }
-                                }
+                                // 直接直通写入管道，不尝试解析 gRPC
+                                // 让后端的 VLESS Codec 去处理（如果格式不对会报错并打印数据，这样我们就能看到原始数据了）
+                                client_write.write_all(&chunk).await?;
+                                info!("➡️ 已转发 {} 字节到 VLESS Handler", chunk.len());
                             }
                             Some(Err(e)) => {
                                 error!("❌ 读取 Body 错误: {}", e);
