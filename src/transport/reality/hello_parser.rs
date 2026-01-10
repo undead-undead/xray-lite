@@ -5,9 +5,10 @@ pub struct ClientHelloInfo {
     pub session_id: Vec<u8>,
     pub client_random: [u8; 32],
     pub public_key: Option<Vec<u8>>,
+    pub server_name: Option<String>,
 }
 
-/// 解析 ClientHello 消息，提取 SessionID, Random 和 X25519 Public Key
+/// 解析 ClientHello 消息，提取 SessionID, Random, X25519 Public Key 和 SNI
 /// 注意：这是一个最小化实现，仅用于 Reality 预检
 pub fn parse_client_hello(buf: &[u8]) -> Result<Option<ClientHelloInfo>> {
     // 检查是否是 TLS Handshake (0x16)
@@ -51,11 +52,11 @@ pub fn parse_client_hello(buf: &[u8]) -> Result<Option<ClientHelloInfo>> {
 
     // Session ID
     if cursor.remaining() < 1 {
-        return Err(anyhow!("Short buffer for SessionID Len"));
+        return Err(anyhow!("Short buffer for Session ID Len"));
     }
     let session_id_len = cursor.get_u8() as usize;
     if cursor.remaining() < session_id_len {
-        return Err(anyhow!("Short buffer for SessionID"));
+        return Err(anyhow!("Short buffer for Session ID"));
     }
 
     let mut session_id = vec![0u8; session_id_len];
@@ -63,21 +64,21 @@ pub fn parse_client_hello(buf: &[u8]) -> Result<Option<ClientHelloInfo>> {
 
     // Cipher Suites
     if cursor.remaining() < 2 {
-        return Err(anyhow!("Short buffer for CipherSuites Len"));
+        return Err(anyhow!("Short buffer for Cipher Suites Len"));
     }
     let cipher_suites_len = cursor.get_u16() as usize;
     if cursor.remaining() < cipher_suites_len {
-        return Err(anyhow!("Short buffer for CipherSuites"));
+        return Err(anyhow!("Short buffer for Cipher Suites"));
     }
     cursor.advance(cipher_suites_len);
 
     // Compression Methods
     if cursor.remaining() < 1 {
-        return Err(anyhow!("Short buffer for CompressionMethods Len"));
+        return Err(anyhow!("Short buffer for Compression Methods Len"));
     }
     let compression_methods_len = cursor.get_u8() as usize;
     if cursor.remaining() < compression_methods_len {
-        return Err(anyhow!("Short buffer for CompressionMethods"));
+        return Err(anyhow!("Short buffer for Compression Methods"));
     }
     cursor.advance(compression_methods_len);
 
@@ -88,6 +89,7 @@ pub fn parse_client_hello(buf: &[u8]) -> Result<Option<ClientHelloInfo>> {
             session_id,
             client_random,
             public_key: None,
+            server_name: None,
         }));
     }
 
@@ -98,6 +100,7 @@ pub fn parse_client_hello(buf: &[u8]) -> Result<Option<ClientHelloInfo>> {
     let mut extensions = &cursor[..extensions_len];
 
     let mut public_key = None;
+    let mut server_name = None;
 
     while extensions.has_remaining() {
         if extensions.remaining() < 4 {
@@ -111,6 +114,37 @@ pub fn parse_client_hello(buf: &[u8]) -> Result<Option<ClientHelloInfo>> {
         }
         let mut ext_data = &extensions[..ext_len];
         extensions.advance(ext_len);
+
+        if ext_type == 0x0000 {
+            // Server Name Indication (SNI)
+            // List Length (2)
+            if ext_data.remaining() >= 2 {
+                let list_len = ext_data.get_u16() as usize;
+                if ext_data.remaining() >= list_len {
+                    let mut list = &ext_data[..list_len];
+                    while list.has_remaining() {
+                        if list.remaining() < 3 {
+                            break;
+                        }
+                        let name_type = list.get_u8(); // 0x00 = HostName
+                        let name_len = list.get_u16() as usize;
+                        if list.remaining() < name_len {
+                            break;
+                        }
+
+                        if name_type == 0x00 {
+                            let mut name_bytes = vec![0u8; name_len];
+                            list.copy_to_slice(&mut name_bytes);
+                            if let Ok(s) = String::from_utf8(name_bytes) {
+                                server_name = Some(s);
+                            }
+                            break;
+                        }
+                        list.advance(name_len);
+                    }
+                }
+            }
+        }
 
         // Key Share Extension (0x0033)
         if ext_type == 0x0033 {
@@ -150,7 +184,7 @@ pub fn parse_client_hello(buf: &[u8]) -> Result<Option<ClientHelloInfo>> {
             }
         }
 
-        if public_key.is_some() {
+        if public_key.is_some() && server_name.is_some() {
             break;
         }
     }
@@ -159,5 +193,6 @@ pub fn parse_client_hello(buf: &[u8]) -> Result<Option<ClientHelloInfo>> {
         session_id,
         client_random,
         public_key,
+        server_name,
     }))
 }

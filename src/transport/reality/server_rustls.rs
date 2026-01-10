@@ -20,18 +20,20 @@ use super::hello_parser::{self, ClientHelloInfo};
 
 pub struct RealityServerRustls {
     reality_config: Arc<RealityConfig>,
+    server_names: Vec<String>,
 }
 
 impl Clone for RealityServerRustls {
     fn clone(&self) -> Self {
         Self {
             reality_config: Arc::clone(&self.reality_config),
+            server_names: self.server_names.clone(),
         }
     }
 }
 
 impl RealityServerRustls {
-    pub fn new(private_key: Vec<u8>, dest: Option<String>, short_ids: Vec<String>) -> Result<Self> {
+    pub fn new(private_key: Vec<u8>, dest: Option<String>, short_ids: Vec<String>, server_names: Vec<String>) -> Result<Self> {
         let mut short_ids_bytes = Vec::new();
         for id in short_ids {
             let b = hex::decode(&id).map_err(|e| anyhow!("Invalid shortId hex: {}", e))?;
@@ -47,6 +49,7 @@ impl RealityServerRustls {
 
         Ok(Self { 
             reality_config: Arc::new(reality_config),
+            server_names,
         })
     }
 
@@ -68,7 +71,19 @@ impl RealityServerRustls {
         }
 
         if let Ok(Some(info)) = hello_parser::parse_client_hello(&buffer) {
-            if let Some((offset, auth_key)) = self.verify_client_reality(&info, &buffer) {
+            // SNI 验证逻辑
+            let sni_valid = if self.server_names.is_empty() {
+                true // 如果没配置 server_names，则允许所有（或者应该默认不允许？为了安全推荐配置）
+            } else if let Some(sni) = &info.server_name {
+                self.server_names.iter().any(|s| s == sni)
+            } else {
+                false // 必须携带 SNI
+            };
+
+            if !sni_valid {
+                warn!("Reality SNI mismatch: {:?} (Allowed: {:?})", info.server_name, self.server_names);
+                // Fallthrough to fallback (don't verify reality)
+            } else if let Some((offset, auth_key)) = self.verify_client_reality(&info, &buffer) {
                 let dest_str = self.reality_config.dest.as_deref().unwrap_or("www.microsoft.com");
                 let dest_host = dest_str.split(':').next().unwrap_or("www.microsoft.com");
 
@@ -105,7 +120,7 @@ impl RealityServerRustls {
         }
 
         let dest = self.reality_config.dest.as_deref().unwrap_or("www.microsoft.com:443");
-        info!("Non-Reality client, falling back to {}", dest);
+        debug!("Non-Reality client or SNI mismatch, falling back to {}", dest);
         self.fallback(stream, &buffer, dest).await?;
         bail!("Fallback total");
     }

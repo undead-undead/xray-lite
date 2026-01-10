@@ -37,7 +37,12 @@ impl RealityServer {
         debug!("目标: {}", config.dest);
         debug!("指纹: {}", config.fingerprint);
 
-        let inner = RealityServerRustls::new(private_key_bytes, Some(config.dest.clone()), config.short_ids.clone())?;
+        let inner = RealityServerRustls::new(
+            private_key_bytes, 
+            Some(config.dest.clone()), 
+            config.short_ids.clone(),
+            config.server_names.clone()
+        )?;
 
         Ok(Self { inner })
     }
