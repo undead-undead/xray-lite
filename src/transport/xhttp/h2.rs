@@ -73,8 +73,17 @@ impl H2Handler {
         debug!("收到请求: {} {}", method, path);
 
         // 验证路径
-        if path != config.path {
-            warn!("路径不匹配: {} != {}", path, config.path);
+        // 验证路径
+        // XHTTP 协议中，请求路径可能是 /path/UUID，所以只能匹配前缀
+        let matches = if config.path == "/" {
+            true 
+        } else {
+            // 确保是前缀匹配，且边界正确（例如 /path 不能匹配 /path2，但可以匹配 /path/uuid）
+            path == config.path || (path.starts_with(&config.path) && path.chars().nth(config.path.len()) == Some('/'))
+        };
+
+        if !matches {
+            warn!("路径不匹配: {} (Config: {})", path, config.path);
             Self::send_error_response(&mut respond, StatusCode::NOT_FOUND).await?;
             return Ok(());
         }
