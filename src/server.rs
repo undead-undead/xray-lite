@@ -427,7 +427,7 @@ impl Server {
             Command::Udp => {
                 info!("📡 UDP 请求: {}", request.address.to_string());
                 
-                // 创建 UDP socket
+                // 创建 UDP socket (Full Cone NAT - 不绑定到特定目标)
                 let udp_socket = match tokio::net::UdpSocket::bind("0.0.0.0:0").await {
                     Ok(s) => s,
                     Err(e) => {
@@ -436,18 +436,13 @@ impl Server {
                     }
                 };
                 
-                // 解析目标地址
+                // 解析目标地址 (初始目标，Full Cone 模式下可接收任意地址响应)
                 let target_addr = request.address.to_string();
-                
-                // 尝试解析并连接目标地址
-                match tokio::net::lookup_host(&target_addr).await {
+                let initial_target: std::net::SocketAddr = match tokio::net::lookup_host(&target_addr).await {
                     Ok(mut addrs) => {
                         if let Some(addr) = addrs.next() {
-                            if let Err(e) = udp_socket.connect(addr).await {
-                                error!("UDP 连接目标失败: {}", e);
-                                return Err(e.into());
-                            }
-                            info!("🔗 UDP 已绑定到: {}", addr);
+                            info!("🔗 UDP 初始目标: {}", addr);
+                            addr
                         } else {
                             error!("无法解析 UDP 目标地址: {}", target_addr);
                             return Err(anyhow::anyhow!("DNS resolution failed"));
@@ -457,56 +452,67 @@ impl Server {
                         error!("DNS 解析失败: {}", e);
                         return Err(e.into());
                     }
-                }
+                };
                 
-                // UDP over TCP 数据帧格式:
-                // [Length (2 bytes, BE)] [Payload]
-                // 
-                // 对于 VLESS UDP，客户端发送的数据格式是:
-                // [Length (2 bytes)] [Address Type (1) + Address + Port (2)] [UDP Payload]
-                // 但由于我们已经从 VLESS 请求中获取了目标地址，后续只需要转发 UDP 载荷
+                // UDP 会话超时配置 (5分钟)
+                let session_timeout = tokio::time::Duration::from_secs(300);
                 
                 let udp_socket = std::sync::Arc::new(udp_socket);
                 let udp_socket_recv = udp_socket.clone();
                 
                 // 预读取的数据作为第一个 UDP 包发送
                 if !buf.is_empty() {
-                    // buf 中可能包含 UDP 数据
-                    // VLESS UDP 帧: [2 bytes length] [payload]
+                    // 解析 VLESS UDP 帧: [2 bytes length] [payload]
                     if buf.len() >= 2 {
-                        let payload = &buf[..];
-                        if let Err(e) = udp_socket.send(payload).await {
-                            error!("UDP 发送失败: {}", e);
-                        } else {
-                            debug!("UDP 发送了 {} 字节 (初始数据)", payload.len());
+                        let len = ((buf[0] as usize) << 8) | (buf[1] as usize);
+                        if buf.len() >= 2 + len {
+                            let payload = &buf[2..2+len];
+                            if let Err(e) = udp_socket.send_to(payload, initial_target).await {
+                                error!("UDP 发送失败: {}", e);
+                            } else {
+                                debug!("UDP 发送了 {} 字节 (初始数据)", len);
+                            }
                         }
                     }
                 }
                 
                 // 使用 tokio::select! 同时处理两个方向的数据
                 let (mut stream_read, mut stream_write) = tokio::io::split(stream);
+                let initial_target_clone = initial_target;
                 
+                // 客户端 -> UDP 目标
                 let send_task = async {
                     let mut read_buf = vec![0u8; 65536];
+                    let mut last_activity = tokio::time::Instant::now();
+                    
                     loop {
-                        // 从 TLS 流读取 UDP 数据
-                        // VLESS UDP 格式: [2 bytes length] [payload]
+                        // 带超时的读取
+                        let read_timeout = session_timeout.saturating_sub(last_activity.elapsed());
+                        
                         let mut len_buf = [0u8; 2];
-                        match tokio::io::AsyncReadExt::read_exact(&mut stream_read, &mut len_buf).await {
-                            Ok(_) => {
+                        match tokio::time::timeout(
+                            read_timeout,
+                            tokio::io::AsyncReadExt::read_exact(&mut stream_read, &mut len_buf)
+                        ).await {
+                            Ok(Ok(_)) => {
+                                last_activity = tokio::time::Instant::now();
                                 let len = ((len_buf[0] as usize) << 8) | (len_buf[1] as usize);
-                                if len > read_buf.len() {
-                                    error!("UDP 包太大: {}", len);
+                                
+                                if len == 0 || len > read_buf.len() {
+                                    if len > read_buf.len() {
+                                        error!("UDP 包太大: {}", len);
+                                    }
                                     break;
                                 }
+                                
                                 match tokio::io::AsyncReadExt::read_exact(&mut stream_read, &mut read_buf[..len]).await {
                                     Ok(_) => {
-                                        // 发送 UDP 数据到目标
-                                        if let Err(e) = udp_socket.send(&read_buf[..len]).await {
+                                        // Full Cone: 使用 send_to 而不是 send
+                                        if let Err(e) = udp_socket.send_to(&read_buf[..len], initial_target_clone).await {
                                             error!("UDP 发送失败: {}", e);
                                             break;
                                         }
-                                        debug!("UDP 发送了 {} 字节", len);
+                                        debug!("UDP 发送了 {} 字节 -> {}", len, initial_target_clone);
                                     }
                                     Err(e) => {
                                         debug!("读取 UDP 载荷失败: {}", e);
@@ -514,46 +520,73 @@ impl Server {
                                     }
                                 }
                             }
-                            Err(e) => {
+                            Ok(Err(e)) => {
                                 debug!("UDP 流结束: {}", e);
                                 break;
                             }
-                        }
-                    }
-                };
-                
-                let recv_task = async {
-                    let mut recv_buf = vec![0u8; 65536];
-                    loop {
-                        // 从 UDP 接收数据
-                        match udp_socket_recv.recv(&mut recv_buf).await {
-                            Ok(n) => {
-                                if n == 0 {
-                                    break;
-                                }
-                                // 封装成 VLESS UDP 帧发回客户端
-                                // [2 bytes length] [payload]
-                                let len_bytes = [(n >> 8) as u8, (n & 0xff) as u8];
-                                use tokio::io::AsyncWriteExt;
-                                if let Err(e) = stream_write.write_all(&len_bytes).await {
-                                    error!("UDP 响应写入长度失败: {}", e);
-                                    break;
-                                }
-                                if let Err(e) = stream_write.write_all(&recv_buf[..n]).await {
-                                    error!("UDP 响应写入数据失败: {}", e);
-                                    break;
-                                }
-                                debug!("UDP 接收了 {} 字节并发回客户端", n);
-                            }
-                            Err(e) => {
-                                error!("UDP 接收失败: {}", e);
+                            Err(_) => {
+                                debug!("UDP 会话超时 (客户端方向)");
                                 break;
                             }
                         }
                     }
                 };
                 
-                // 同时运行发送和接收任务
+                // UDP 目标 -> 客户端 (Full Cone: 接收任意地址的响应)
+                let recv_task = async {
+                    let mut recv_buf = vec![0u8; 65536];
+                    let mut last_activity = tokio::time::Instant::now();
+                    
+                    loop {
+                        let recv_timeout = session_timeout.saturating_sub(last_activity.elapsed());
+                        
+                        match tokio::time::timeout(
+                            recv_timeout,
+                            udp_socket_recv.recv_from(&mut recv_buf)  // Full Cone: recv_from 接收任意地址
+                        ).await {
+                            Ok(Ok((n, from_addr))) => {
+                                if n == 0 {
+                                    break;
+                                }
+                                last_activity = tokio::time::Instant::now();
+                                
+                                debug!("UDP 收到 {} 字节 <- {}", n, from_addr);
+                                
+                                // 封装成 VLESS UDP 帧发回客户端
+                                // [2 bytes length] [payload]
+                                let len_bytes = [(n >> 8) as u8, (n & 0xff) as u8];
+                                
+                                use tokio::io::AsyncWriteExt;
+                                
+                                // 使用单次 write 优化，减少系统调用
+                                let mut frame = Vec::with_capacity(2 + n);
+                                frame.extend_from_slice(&len_bytes);
+                                frame.extend_from_slice(&recv_buf[..n]);
+                                
+                                if let Err(e) = stream_write.write_all(&frame).await {
+                                    error!("UDP 响应写入失败: {}", e);
+                                    break;
+                                }
+                                
+                                // 立即 flush 以降低延迟
+                                if let Err(e) = stream_write.flush().await {
+                                    error!("UDP 响应 flush 失败: {}", e);
+                                    break;
+                                }
+                            }
+                            Ok(Err(e)) => {
+                                error!("UDP 接收失败: {}", e);
+                                break;
+                            }
+                            Err(_) => {
+                                debug!("UDP 会话超时 (服务器方向)");
+                                break;
+                            }
+                        }
+                    }
+                };
+                
+                // 同时运行发送和接收任务，任一结束则全部结束
                 tokio::select! {
                     _ = send_task => {
                         debug!("UDP 发送任务结束");
