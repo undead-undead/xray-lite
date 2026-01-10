@@ -85,11 +85,7 @@ impl Validator {
     }
 
     fn validate_xhttp_settings(xhttp: &super::XhttpSettings, inbound_idx: usize) -> Result<()> {
-        // 验证 host
-        // 验证 host
-        // if xhttp.host.is_empty() {
-        //     return Err(anyhow!("入站 {} 的 XHTTP host 不能为空", inbound_idx));
-        // }
+        // host validation removed to allow empty host
 
         // 验证 path
         if xhttp.path.is_empty() {
