@@ -24,7 +24,7 @@ A lightweight, high-performance VLESS + Reality proxy server implemented in pure
 | **VLESS UDP** | ✅ Stable | UDP over TCP support / UDP over TCP 支持 |
 | **Reality** | ✅ Stable | TLS 1.3 with dynamic certificate / TLS 1.3 动态证书 |
 | **SNI Sniffing** | ✅ Stable | Auto-detect target domain / 自动嗅探目标域名 |
-| **XHTTP** | ✅ Stable | HTTP/2 transport with auto mode / HTTP/2 传输层 (支持 auto 模式) |
+| **XHTTP** | ⚠️ PC Only | HTTP/2 transport (PC/Android OK, iOS incompatible) / HTTP/2 传输 (PC/安卓正常, iOS 暂不兼容) |
 
 ### Why Xray-Lite? / 为什么选择 Xray-Lite？
 
@@ -74,9 +74,13 @@ cargo build --release
 |-----------------|-----------------|---------------|
 | v2rayN | Windows | ✅ Tested |
 | v2rayNG | Android | ✅ Tested |
-| Shadowrocket | iOS | ✅ Tested |
+| Shadowrocket | iOS | ⚠️ Partial (Reality Only) |
 | Passwall | OpenWrt | ✅ Tested |
 | Xray-core | CLI | ✅ Tested |
+
+> **Note**: For mobile clients (Shadowrocket/Stash), please use the **Reality (TCP)** protocol. The **XHTTP (gRPC)** protocol is currently having compatibility issues on iOS.
+>
+> **注意**：移动端（小火箭/Stash）请使用 **Reality (TCP)** 协议。**XHTTP (gRPC)** 协议目前在 iOS 上存在兼容性问题。
 
 ### Configuration Parameters / 配置参数
 
