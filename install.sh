@@ -19,7 +19,7 @@ BLUE='\033[0;34m'
 NC='\033[0m'
 
 # Version / 版本
-VERSION="v0.2.74"
+VERSION="v0.2.75"
 REPO="undead-undead/xray-lite"
 
 echo -e "${BLUE}=========================================${NC}"
@@ -76,74 +76,33 @@ echo -e "${GREEN}✓ Directory created / 目录已创建: $INSTALL_DIR${NC}"
 echo ""
 
 # Download binary / 下载二进制文件
-echo -e "${YELLOW}[2/6] Downloading Xray-Lite binary... / 下载 Xray-Lite 二进制文件...${NC}"
+# Download Static Binaries / 下载静态二进制文件
+echo -e "${YELLOW}[2/6] Downloading Xray-Lite binaries... / 下载 Xray-Lite 二进制文件...${NC}"
 
-DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${VERSION}/xray-lite-${BINARY_ARCH}-unknown-linux-gnu.tar.gz"
-FALLBACK_URL="https://raw.githubusercontent.com/${REPO}/main/xray-lite-${BINARY_ARCH}-unknown-linux-gnu.tar.gz?t=$(date +%s)"
-# Fallback to release_artifacts in main repo if root raw failed; use timestamp to bust cache
-FALLBACK_RA_URL="https://raw.githubusercontent.com/${REPO}/main/release_artifacts/xray-lite-${BINARY_ARCH}-unknown-linux-gnu.tar.gz?t=$(date +%s)"
+XRAY_BINARY="vless-server-linux-${BINARY_ARCH}"
+KEYGEN_BINARY="keygen-linux-${BINARY_ARCH}"
 
-download_file() {
-    local url=$1
-    local output=$2
-    
-    # Try curl first with --fail to handle 404s correctly
-    if command -v curl &> /dev/null; then
-        if curl -L -f --progress-bar "$url" -o "$output"; then
-            return 0
-        else
-            rm -f "$output" # Ensure no partial/error file is left
-            return 1
-        fi
-    elif command -v wget &> /dev/null; then
-        if wget -q --show-progress "$url" -O "$output"; then
-            return 0
-        else
-            rm -f "$output"
-            return 1
-        fi
-    else
-        return 1
-    fi
-}
+DOWNLOAD_PREFIX="https://github.com/${REPO}/releases/download/${VERSION}"
+FALLBACK_PREFIX="https://github.com/${REPO}/releases/download/${VERSION}"
 
-# Function to check if file is valid gzip
-is_valid_gzip() {
-    local file=$1
-    if gzip -t "$file" >/dev/null 2>&1; then
-        return 0
-    else
-        echo -e "${YELLOW}Warning: Downloaded file is not a valid gzip package.${NC}"
-        rm -f "$file"
-        return 1
-    fi
-}
-
-echo "Attempting download..."
-
-# Try Release URL first
-if download_file "$DOWNLOAD_URL" "xray-lite.tar.gz" && is_valid_gzip "xray-lite.tar.gz"; then
-    echo -e "${GREEN}✓ Download complete (Release)${NC}"
+echo "Downloading vless-server..."
+if curl -L -f --progress-bar "${DOWNLOAD_PREFIX}/${XRAY_BINARY}" -o "vless-server"; then
+    echo -e "${GREEN}✓ vless-server downloaded${NC}"
 else
-    echo -e "${YELLOW}Release download failed/invalid, trying fallback to raw artifacts...${NC}"
-    # Try Fallback URL
-    if download_file "$FALLBACK_RA_URL" "xray-lite.tar.gz" && is_valid_gzip "xray-lite.tar.gz"; then
-         echo -e "${GREEN}✓ Download complete (Artifacts)${NC}"
-    else
-         echo -e "${RED}Download failed! Could not retrieve valid binary.${NC}"
-         echo "Please check your network or try again later."
-         exit 1
-    fi
+    echo -e "${RED}Failed to download vless-server${NC}"
+    exit 1
 fi
 
-echo ""
+echo "Downloading keygen..."
+if curl -L -f --progress-bar "${DOWNLOAD_PREFIX}/${KEYGEN_BINARY}" -o "keygen"; then
+    echo -e "${GREEN}✓ keygen downloaded${NC}"
+else
+    echo -e "${RED}Failed to download keygen${NC}"
+    exit 1
+fi
 
-# Extract binary / 解压二进制文件
-echo -e "${YELLOW}[3/6] Extracting files... / 解压文件...${NC}"
-tar -xzf xray-lite.tar.gz
-rm xray-lite.tar.gz
 chmod +x vless-server keygen
-echo -e "${GREEN}✓ Files extracted / 文件已解压${NC}"
+echo -e "${GREEN}✓ Files prepared / 文件已准备就绪${NC}"
 echo ""
 
 # Generate configuration / 生成配置
