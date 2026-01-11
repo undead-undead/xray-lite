@@ -12,7 +12,7 @@ use once_cell::sync::Lazy;
 
 use super::XhttpConfig;
 
-/// 会话状态，用于焊接 GET 和 POST
+/// 全局会话管理器：用于焊接 XHTTP 的 GET（下载）和 POST（上传）流
 struct Session {
     to_vless_tx: mpsc::UnboundedSender<Bytes>,
     notify: Arc<Notify>,
@@ -22,7 +22,7 @@ static SESSIONS: Lazy<Arc<Mutex<HashMap<String, Session>>>> = Lazy::new(|| {
     Arc::new(Mutex::new(HashMap::new()))
 });
 
-/// HTTP/2 处理器
+/// 终极 H2/XHTTP 处理器 (v0.2.72: 全自适应模式)
 #[derive(Clone)]
 pub struct H2Handler {
     config: XhttpConfig,
@@ -39,7 +39,7 @@ impl H2Handler {
         F: Fn(Box<dyn crate::server::AsyncStream>) -> Fut + Clone + Send + Sync + 'static,
         Fut: std::future::Future<Output = Result<()>> + Send + 'static,
     {
-        debug!("XHTTP: 启动 V71 “等候室”配对引擎");
+        debug!("XHTTP: 启动 V72 纯净自适应引擎");
 
         let mut builder = server::Builder::new();
         builder
@@ -56,7 +56,7 @@ impl H2Handler {
                     let handler = handler.clone();
                     tokio::spawn(async move {
                         if let Err(e) = Self::handle_request(config, request, respond, handler).await {
-                            debug!("请求闭合: {}", e);
+                            debug!("连接处理闭合: {}", e);
                         }
                     });
                 }
@@ -88,15 +88,15 @@ impl H2Handler {
         }
 
         if method == "GET" {
+            // XHTTP 下载流：创建会话并启动业务逻辑
             Self::handle_xhttp_get(path, respond, handler).await?;
         } else if method == "POST" {
-            // --- 智能等候逻辑 ---
             let user_agent = request.headers().get("user-agent").and_then(|v| v.to_str().ok()).unwrap_or("");
             let is_pc = user_agent.contains("Go-http-client");
 
-            // 如果不是 PC，我们就等 500ms 看看有没有配对的 GET（XHTTP 模式）
+            // 等候配对逻辑 (针对移动端乱序)
             if !is_pc {
-                for _ in 0..10 { // 50ms * 10 = 500ms
+                for _ in 0..10 {
                     let found = {
                         let sessions = SESSIONS.lock().unwrap();
                         sessions.contains_key(&path)
@@ -112,9 +112,10 @@ impl H2Handler {
             };
 
             if let Some(tx) = session_tx {
-                Self::handle_xhttp_post(path, request, respond, tx).await?;
+                // 配对成功：作为上传流运行
+                Self::handle_xhttp_post(request, respond, tx).await?;
             } else {
-                // 实在没等到，或者是 PC 端，走独立双向模式
+                // 未配对（PC 或直连 gRPC）：作为独立双向流运行
                 let content_type = request.headers().get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("");
                 let is_grpc = content_type.contains("grpc") && !is_pc;
                 Self::handle_standalone(request, respond, handler, is_grpc).await?;
@@ -125,7 +126,7 @@ impl H2Handler {
         Ok(())
     }
 
-    /// 独立流转发
+    /// 模式 A: 独立双向转发 (PC / 标准 gRPC)
     async fn handle_standalone<F, Fut>(
         mut request: Request<h2::RecvStream>,
         mut respond: SendResponse<Bytes>,
@@ -147,6 +148,7 @@ impl H2Handler {
         tokio::spawn(handler(Box::new(server_io)));
         let (mut client_read, mut client_write) = tokio::io::split(client_io);
 
+        // UP
         let up_task = async move {
             let mut body = request.into_body();
             let mut leftover = BytesMut::new();
@@ -171,6 +173,7 @@ impl H2Handler {
             Ok::<(), anyhow::Error>(())
         };
 
+        // DOWN
         let down_task = async move {
             let mut buf = vec![0u8; 16384];
             use tokio::io::AsyncReadExt;
@@ -197,11 +200,12 @@ impl H2Handler {
             Ok::<(), anyhow::Error>(())
         };
 
-        let _ = tokio::join!(up_task, down_task);
+        let _ = tokio::spawn(up_task);
+        down_task.await?; 
         Ok(())
     }
 
-    /// XHTTP GET 下载通道
+    /// 模式 B: 会话配对 (XHTTP 下载通道)
     async fn handle_xhttp_get<F, Fut>(
         path: String,
         mut respond: SendResponse<Bytes>,
@@ -213,7 +217,6 @@ impl H2Handler {
     {
         let (to_vless_tx, mut to_vless_rx) = mpsc::unbounded_channel::<Bytes>();
         let notify = Arc::new(Notify::new());
-        
         {
             let mut sessions = SESSIONS.lock().unwrap();
             sessions.insert(path.clone(), Session { to_vless_tx, notify: notify.clone() });
@@ -261,8 +264,8 @@ impl H2Handler {
         Ok(())
     }
 
+    /// 入注上传流量
     async fn handle_xhttp_post(
-        _path: String,
         request: Request<h2::RecvStream>,
         mut respond: SendResponse<Bytes>,
         tx: mpsc::UnboundedSender<Bytes>,
