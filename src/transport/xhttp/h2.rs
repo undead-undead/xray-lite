@@ -69,11 +69,6 @@ impl H2Handler {
         let path = request.uri().path();
         let method = request.method();
 
-        // 打印所有 Header 用于调试
-        for (name, value) in request.headers() {
-            debug!("Header: {} = {:?}", name, value);
-        }
-
         let content_type = request.headers()
             .get("content-type")
             .and_then(|v| v.to_str().ok())
@@ -84,9 +79,11 @@ impl H2Handler {
             .and_then(|v| v.to_str().ok())
             .unwrap_or("");
 
-        // 核心逻辑：只有标识为 Shadowrocket 的客户端且声明是 grpc 时，才开启帧封装
-        // 电脑端 (Xray-core) 会发送 application/grpc 但使用 Raw 传输，所以我们这里排除它
-        let is_grpc = content_type.contains("grpc") && (user_agent.contains("Shadowrocket") || user_agent.contains("Stash"));
+        // 判定准则：
+        // 1. Content-Type 包含 grpc
+        // 2. 不是电脑端 Xray-core (其 UA 包含 Go-http-client)
+        // 3. 必须是 POST 请求 (gRPC 标准行为)
+        let is_grpc = method == "POST" && content_type.contains("grpc") && !user_agent.contains("Go-http-client");
         
         debug!("收到请求: {} {} (gRPC Mode: {}, UA: {})", method, path, is_grpc, user_agent);
 
@@ -109,7 +106,7 @@ impl H2Handler {
         Ok(())
     }
 
-    /// 核心双向流处理逻辑 (支持 Raw 或 gRPC 封装)
+    /// 核心双向流处理逻辑
     async fn handle_dual_stream<F, Fut>(
         mut request: Request<h2::RecvStream>,
         mut respond: SendResponse<Bytes>,
