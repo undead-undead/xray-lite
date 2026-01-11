@@ -1,5 +1,5 @@
 use anyhow::{anyhow, Result};
-use bytes::{Bytes, BytesMut};
+use bytes::{Buf, Bytes, BytesMut};
 use h2::server::{self, SendResponse};
 use hyper::http::{Request, Response, StatusCode};
 use tokio::io::{AsyncRead, AsyncWrite};
