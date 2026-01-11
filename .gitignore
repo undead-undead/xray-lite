@@ -36,3 +36,7 @@ config.json
 gh
 *.log
 *.backup
+*.tar.gz
+/release_artifacts/
+.gemini/
+.antigravity/
