@@ -69,14 +69,26 @@ impl H2Handler {
         let path = request.uri().path();
         let method = request.method();
 
-        // 识别客户端类型：Shadowrocket 会发送 application/grpc
+        // 打印所有 Header 用于调试
+        for (name, value) in request.headers() {
+            debug!("Header: {} = {:?}", name, value);
+        }
+
         let content_type = request.headers()
             .get("content-type")
             .and_then(|v| v.to_str().ok())
             .unwrap_or("");
         
-        let is_grpc = content_type.contains("grpc");
-        debug!("收到请求: {} {} (gRPC Mode: {})", method, path, is_grpc);
+        let user_agent = request.headers()
+            .get("user-agent")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+
+        // 核心逻辑：只有标识为 Shadowrocket 的客户端且声明是 grpc 时，才开启帧封装
+        // 电脑端 (Xray-core) 会发送 application/grpc 但使用 Raw 传输，所以我们这里排除它
+        let is_grpc = content_type.contains("grpc") && (user_agent.contains("Shadowrocket") || user_agent.contains("Stash"));
+        
+        debug!("收到请求: {} {} (gRPC Mode: {}, UA: {})", method, path, is_grpc, user_agent);
 
         if !path.starts_with(&config.path) {
             Self::send_error_response(&mut respond, StatusCode::NOT_FOUND).await?;
@@ -158,7 +170,6 @@ impl H2Handler {
                 if n == 0 { break; }
                 
                 if is_grpc {
-                    // 包装 gRPC 帧头: [0x00][Len 4B]
                     let mut frame = BytesMut::with_capacity(5 + n);
                     frame.extend_from_slice(&[0u8]);
                     frame.extend_from_slice(&(n as u32).to_be_bytes());
@@ -183,7 +194,7 @@ impl H2Handler {
         Ok(())
     }
 
-    /// 单向模式处理 (始终使用 Raw)
+    /// 单向模式处理
     async fn handle_stream_one<F, Fut>(
         mut request: Request<h2::RecvStream>,
         mut respond: SendResponse<Bytes>,
