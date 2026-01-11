@@ -18,7 +18,7 @@ pub async fn serve_vless(
     use tokio::time::{timeout, Duration};
     
     // 第一次读取，5秒超时
-    let read_result = timeout(Duration::from_secs(5), stream.read_buf(&mut buf)).await;
+    let read_result = timeout(Duration::from_secs(30), stream.read_buf(&mut buf)).await;
     
     match read_result {
         Ok(Ok(0)) => {

@@ -27,8 +27,14 @@ impl H2Handler {
     {
         info!("开始处理 HTTP/2 连接");
 
-        // 创建 HTTP/2 服务器连接
-        let mut connection = server::handshake(stream).await?;
+        // 创建 HTTP/2 服务器连接 (高性能配置)
+        let mut builder = server::Builder::new();
+        builder
+            .initial_window_size(4 * 1024 * 1024)
+            .max_concurrent_streams(500)
+            .max_frame_size(16384);
+
+        let mut connection = builder.handshake(stream).await?;
         debug!("HTTP/2 握手完成");
 
         // 处理传入的请求流
@@ -38,7 +44,6 @@ impl H2Handler {
                     let config = self.config.clone();
                     let handler = handler.clone();
                     
-                    // 为每个请求生成一个任务
                     tokio::spawn(async move {
                         if let Err(e) = Self::handle_request(config, request, respond, handler).await {
                             warn!("处理请求失败: {}", e);
@@ -56,7 +61,7 @@ impl H2Handler {
         Ok(())
     }
 
-    /// 处理单个 HTTP/2 请求
+    // ... (handle_request)
     async fn handle_request<F, Fut>(
         config: XhttpConfig,
         request: Request<h2::RecvStream>,
@@ -72,23 +77,14 @@ impl H2Handler {
 
         debug!("收到请求: {} {}", method, path);
 
-        // 验证路径
-        // 验证路径 (简化版：只检查前缀)
-        // 只要请求路径以配置的路径开头即可，不再严格校验后续字符
-        // 这能最大限度保证兼容性，哪怕配置是 /path 而请求是 /pathSometing (极少见) 也能通
         if !path.starts_with(&config.path) {
             warn!("路径不匹配: {} (Config: {})", path, config.path);
             Self::send_error_response(&mut respond, StatusCode::NOT_FOUND).await?;
             return Ok(());
         }
 
-        // Host 校验已移除，因为 Reality/TLS 已经提供了足够的安全性，且 CDN/SNI 场景下 Host 可能不一致
-        // if !config.host.is_empty() { ... }
-
-        // 根据模式处理
         match config.mode.as_str() {
             "auto" => {
-                // 自动选择：根据请求方法判断
                 if method == "POST" {
                     Self::handle_stream_up(request, respond, handler).await?;
                 } else {
@@ -113,7 +109,7 @@ impl H2Handler {
         Ok(())
     }
 
-    /// 处理 stream-up 模式 (上传流 - VLESS via gRPC)
+    /// 处理 stream-up 模式 (双向流 - VLESS via gRPC)
     async fn handle_stream_up<F, Fut>(
         mut request: Request<h2::RecvStream>,
         mut respond: SendResponse<Bytes>,
@@ -123,65 +119,97 @@ impl H2Handler {
         F: Fn(Box<dyn crate::server::AsyncStream>) -> Fut + Clone + Send + 'static,
         Fut: std::future::Future<Output = Result<()>> + Send + 'static,
     {
-        debug!("处理 stream-up 模式");
-        
-        // Pseudo-random padding
-        let padding_len = (std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().subsec_nanos() % 500 + 100) as usize;
-        let padding = "0".repeat(padding_len);
+        debug!("处理 stream-up 模式 (gRPC Framing Enabled)");
 
         let response = Response::builder()
             .status(StatusCode::OK)
             .header("content-type", "application/grpc")
             .header("grpc-encoding", "identity")
-            .header("x-padding", padding)
             .body(())
             .map_err(|e| anyhow!("构建响应失败: {}", e))?;
 
         let mut send_stream = respond.send_response(response, false)?;
-        let (client_io, server_io) = tokio::io::duplex(8192);
+        let (client_io, server_io) = tokio::io::duplex(16384);
         tokio::spawn(handler(Box::new(server_io)));
         let (mut client_read, mut client_write) = tokio::io::split(client_io);
 
+        // --- UP TASK (Client -> Server) ---
+        // 解析 gRPC L-P-M 帧并提取 Raw VLESS 数据
         let up_task = async move {
             let mut body = request.into_body();
+            let mut leftover = bytes::BytesMut::new();
+            let mut is_grpc_framed = None; // Sniffing state
+
             while let Some(chunk_result) = body.data().await {
-                match chunk_result {
-                    Ok(chunk) => {
-                         let _ = body.flow_control().release_capacity(chunk.len());
-                         use tokio::io::AsyncWriteExt;
-                         client_write.write_all(&chunk).await?;
+                let chunk = chunk_result?;
+                let _ = body.flow_control().release_capacity(chunk.len());
+                leftover.extend_from_slice(&chunk);
+
+                // Sniffing: First byte of first chunk
+                if is_grpc_framed.is_none() && leftover.len() >= 5 {
+                    if leftover[0] == 0 { // Compressed flag is usually 0
+                        is_grpc_framed = Some(true);
+                        debug!("Sniffed: gRPC Framed Client (Shadowrocket/iOS)");
+                    } else {
+                        is_grpc_framed = Some(false);
+                        debug!("Sniffed: Raw H2 Client (PC/Xray)");
                     }
-                    Err(e) => {
-                        debug!("XHTTP Body read error/closed: {}", e);
-                        break;
+                }
+
+                if let Some(true) = is_grpc_framed {
+                    // Unwrap gRPC Frames
+                    while leftover.len() >= 5 {
+                        let msg_len = u32::from_be_bytes([leftover[1], leftover[2], leftover[3], leftover[4]]) as usize;
+                        if leftover.len() >= 5 + msg_len {
+                            let _ = leftover.split_to(5);
+                            let data = leftover.split_to(msg_len);
+                            use tokio::io::AsyncWriteExt;
+                            client_write.write_all(&data).await?;
+                        } else {
+                            break; // Wait for full message
+                        }
                     }
+                } else if let Some(false) = is_grpc_framed {
+                    // Traditional Raw Pipe
+                    use tokio::io::AsyncWriteExt;
+                    client_write.write_all(&leftover).await?;
+                    leftover.clear();
+                } else if leftover.len() > 0 && leftover.len() < 5 {
+                    // Need more to sniff
                 }
             }
             Ok::<(), anyhow::Error>(())
         };
 
+        // --- DOWN TASK (Server -> Client) ---
+        // 将 Raw VLESS 数据包装进 gRPC L-P-M 帧
         let down_task = async move {
-            let mut buf = vec![0u8; 8192];
+            let mut buf = vec![0u8; 16000]; // Max allowed payload in one H2 FRAME usually
             use tokio::io::AsyncReadExt;
             loop {
                 let n = client_read.read(&mut buf).await?;
                 if n == 0 { break; }
                 
-                // let msg = super::grpc::GrpcMessage::new(buf[..n].to_vec());
-                // send_stream.send_data(msg.encode(), false)?;
+                // Wrap in gRPC Frame: [0x00][Len 4B][Data]
+                let mut frame = bytes::BytesMut::with_capacity(5 + n);
+                frame.extend_from_slice(&[0u8]); // No compression
+                frame.extend_from_slice(&(n as u32).to_be_bytes());
+                frame.extend_from_slice(&buf[..n]);
                 
-                // Switch to Raw Pipe for downstream too
-                send_stream.send_data(Bytes::copy_from_slice(&buf[..n]), false)?;
+                send_stream.send_data(frame.freeze(), false)?;
             }
-            // 发送 Trailer
-            // 简单的 GRPC-Status: 0 trailer 在 send_response 时很难发送，h2 trait 需要 send_trailers
-            // 这里我们简化，直接结束流
-            send_stream.send_data(Bytes::new(), true)?;
+            
+            // 发送 gRPC Trailers 以完成请求周期
+            let mut trailers = hyper::http::HeaderMap::new();
+            trailers.insert("grpc-status", "0".parse().unwrap());
+            trailers.insert("grpc-message", "OK".parse().unwrap());
+            send_stream.send_trailers(trailers)?;
+            
             Ok::<(), anyhow::Error>(())
         };
 
         let _ = tokio::join!(up_task, down_task);
-        info!("stream-up 完成");
+        debug!("stream-up 完成");
         Ok(())
     }
 

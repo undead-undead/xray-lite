@@ -1,11 +1,11 @@
 [package]
-name = "vless-reality-xhttp"
-version = "0.1.0"
+name = "xray-lite"
+version = "0.2.60"
 edition = "2021"
-authors = ["Your Name <your.email@example.com>"]
-description = "Lightweight VLESS+Reality+XHTTP proxy implementation in Rust"
+authors = ["Undead <undead-undead@github.com>"]
+description = "Lightweight VLESS+Reality+XHTTP proxy implementation in Rust, featuring anti-probing and raw pipe transport."
 license = "MIT"
-repository = "https://github.com/yourusername/xray-lite"
+repository = "https://github.com/undead-undead/xray-lite"
 
 [dependencies]
 # 异步运行时

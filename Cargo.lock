@@ -1638,45 +1638,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
-name = "vless-reality-xhttp"
-version = "0.1.0"
-dependencies = [
- "aes-gcm",
- "anyhow",
- "base64 0.21.7",
- "bytes",
- "clap",
- "criterion",
- "futures",
- "h2",
- "hex",
- "hkdf",
- "hyper",
- "hyper-util",
- "libc",
- "rand",
- "rcgen",
- "ring",
- "rustls",
- "rustls-pemfile",
- "rustls-pki-types",
- "serde",
- "serde_json",
- "sha2",
- "socket2 0.5.10",
- "thiserror",
- "tokio",
- "tokio-rustls",
- "tokio-test",
- "tokio-util",
- "toml",
- "tracing",
- "tracing-subscriber",
- "uuid",
- "x25519-dalek",
-]
-
-[[package]]
 name = "walkdir"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1961,6 +1922,45 @@ dependencies = [
  "rand_core",
  "serde",
  "zeroize",
+]
+
+[[package]]
+name = "xray-lite"
+version = "0.2.60"
+dependencies = [
+ "aes-gcm",
+ "anyhow",
+ "base64 0.21.7",
+ "bytes",
+ "clap",
+ "criterion",
+ "futures",
+ "h2",
+ "hex",
+ "hkdf",
+ "hyper",
+ "hyper-util",
+ "libc",
+ "rand",
+ "rcgen",
+ "ring",
+ "rustls",
+ "rustls-pemfile",
+ "rustls-pki-types",
+ "serde",
+ "serde_json",
+ "sha2",
+ "socket2 0.5.10",
+ "thiserror",
+ "tokio",
+ "tokio-rustls",
+ "tokio-test",
+ "tokio-util",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+ "x25519-dalek",
 ]
 
 [[package]]
