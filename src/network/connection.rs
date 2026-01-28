@@ -1,50 +1,6 @@
-use std::sync::Mutex;
-use once_cell::sync::Lazy;
 use anyhow::Result;
-use tokio::net::TcpStream;
-use tokio::io::{AsyncRead, AsyncWrite, AsyncReadExt, AsyncWriteExt};
-use tracing::{debug, error};
-
-const BUFFER_SIZE: usize = 16 * 1024;
-static BUFFER_POOL: Lazy<Mutex<Vec<Vec<u8>>>> = Lazy::new(|| Mutex::new(Vec::with_capacity(256)));
-
-struct PooledBuffer(Option<Vec<u8>>);
-
-impl PooledBuffer {
-    fn get() -> Self {
-        if let Ok(mut pool) = BUFFER_POOL.lock() {
-            if let Some(buf) = pool.pop() {
-                return PooledBuffer(Some(buf));
-            }
-        }
-        PooledBuffer(Some(vec![0u8; BUFFER_SIZE]))
-    }
-}
-
-impl std::ops::Deref for PooledBuffer {
-    type Target = [u8];
-    fn deref(&self) -> &Self::Target {
-        self.0.as_ref().unwrap()
-    }
-}
-
-impl std::ops::DerefMut for PooledBuffer {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        self.0.as_mut().unwrap()
-    }
-}
-
-impl Drop for PooledBuffer {
-    fn drop(&mut self) {
-        if let Some(buf) = self.0.take() {
-            if let Ok(mut pool) = BUFFER_POOL.lock() {
-                if pool.len() < 512 {
-                    pool.push(buf);
-                }
-            }
-        }
-    }
-}
+use tokio::io::{AsyncRead, AsyncWrite};
+use tracing::debug;
 
 /// 代理连接
 pub struct ProxyConnection<C, R> {
@@ -66,49 +22,20 @@ where
     }
 
     /// 双向数据转发
-    pub async fn relay(self) -> Result<()> {
-        debug!("开始双向数据转发 (已启用内存池)");
+    pub async fn relay(mut self) -> Result<()> {
+        debug!("开始双向数据转发 (使用 tokio::io::copy_bidirectional)");
 
-        let (mut c_r, mut c_w) = tokio::io::split(self.client_stream);
-        let (mut r_r, mut r_w) = tokio::io::split(self.remote_stream);
-
-        let client_to_remote = async {
-            let mut buf = PooledBuffer::get();
-            loop {
-                let n = c_r.read(&mut buf).await?;
-                if n == 0 {
-                    r_w.shutdown().await?;
-                    break;
-                }
-                r_w.write_all(&buf[..n]).await?;
-            }
-            Ok::<u64, std::io::Error>(0)
-        };
-
-        let remote_to_client = async {
-            let mut buf = PooledBuffer::get();
-            loop {
-                let n = r_r.read(&mut buf).await?;
-                if n == 0 {
-                    c_w.shutdown().await?;
-                    break;
-                }
-                c_w.write_all(&buf[..n]).await?;
-            }
-            Ok::<u64, std::io::Error>(0)
-        };
-
-        // 使用 try_join! 并发执行两个拷贝任务
-        // 任何一方出错或完成，都会结束
-        match tokio::try_join!(client_to_remote, remote_to_client) {
-            Ok(_) => {
-                debug!("连接正常关闭");
+        // 直接使用 Tokio 的双向拷贝优化
+        // 内部使用了优化的 buffer 策略，避免了我们手动维护 Mutex Pool 的开销
+        match tokio::io::copy_bidirectional(&mut self.client_stream, &mut self.remote_stream).await {
+            Ok((from_client, from_remote)) => {
+                debug!("连接结束: 客户端->远程 {} 字节, 远程->客户端 {} 字节", from_client, from_remote);
                 Ok(())
-            }
+            },
             Err(e) => {
-                // 如果是正常的连接重置或关闭，不记录为错误
+                // 通常是连接断开，视为正常
                 debug!("连接断开: {}", e);
-                Err(e.into())
+                Ok(())
             }
         }
     }
