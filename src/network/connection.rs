@@ -1,6 +1,7 @@
 use anyhow::Result;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tracing::debug;
+use tokio::net::TcpStream;
+use tracing::{debug, error};
 
 /// 代理连接
 pub struct ProxyConnection<C, R> {
@@ -26,14 +27,12 @@ where
         debug!("开始双向数据转发 (使用 tokio::io::copy_bidirectional)");
 
         // 直接使用 Tokio 的双向拷贝优化
-        // 内部使用了优化的 buffer 策略，避免了我们手动维护 Mutex Pool 的开销
         match tokio::io::copy_bidirectional(&mut self.client_stream, &mut self.remote_stream).await {
             Ok((from_client, from_remote)) => {
                 debug!("连接结束: 客户端->远程 {} 字节, 远程->客户端 {} 字节", from_client, from_remote);
                 Ok(())
             },
             Err(e) => {
-                // 通常是连接断开，视为正常
                 debug!("连接断开: {}", e);
                 Ok(())
             }
