@@ -231,24 +231,14 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncWrite for TlsStream<S> {
     ) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
 
-        // 缓冲策略: 只有 buffer 超过 14KB 时才 flush，否则只是积攒
-        if this.write_buffer.len() + buf.len() > 14336 {
-            // ~14KB threshold
-            // Try to flush first
-            if let Poll::Ready(Err(e)) = this.flush_write_buffer(cx) {
-                return Poll::Ready(Err(e));
-            }
-            // If flush returned Pending, we can't accept more data yet?
-            // Actually, if flush is Pending, strictly we should return Pending.
-            // But our `flush_write_buffer` is simple and atomic-like.
-
-            if !this.write_buffer.is_empty() {
-                return Poll::Pending;
-            }
-        }
-
         // Add to buffer
         this.write_buffer.extend_from_slice(buf);
+
+        // Try to flush immediately to reduce latency
+        if let Err(e) = std::task::ready!(this.flush_write_buffer(cx)) {
+            return Poll::Ready(Err(e));
+        }
+
         Poll::Ready(Ok(buf.len()))
     }
 
