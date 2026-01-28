@@ -251,8 +251,9 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncWrite for TlsStream<S> {
         // Add to plaintext buffer (batch writes for efficiency)
         this.write_buffer.extend_from_slice(buf);
 
-        // Only flush if buffer is getting large (14KB threshold)
-        if this.write_buffer.len() >= 14 * 1024 {
+        // Flush if buffer reaches 4KB threshold (balances latency vs efficiency)
+        // Lower than 14KB to avoid delays on initial YouTube video requests
+        if this.write_buffer.len() >= 4 * 1024 {
             match this.flush_write_buffer(cx) {
                 Poll::Ready(Ok(())) => Poll::Ready(Ok(buf.len())),
                 Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
