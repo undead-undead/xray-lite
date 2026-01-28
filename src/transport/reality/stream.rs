@@ -19,6 +19,9 @@ pub struct TlsStream<S> {
 
     // Write buffer (plaintext accumulation)
     write_buffer: BytesMut,
+    // Encrypted output buffer (for handling partial writes)
+    encrypted_output_buffer: BytesMut,
+    encrypted_output_offset: usize,
 
     // 序列号
     read_seq: u64,
@@ -33,6 +36,8 @@ impl<S: AsyncRead + AsyncWrite + Unpin> TlsStream<S> {
             input_buffer: BytesMut::with_capacity(24 * 1024),
             decrypted_buffer: BytesMut::with_capacity(24 * 1024),
             write_buffer: BytesMut::with_capacity(16 * 1024 + 1024),
+            encrypted_output_buffer: BytesMut::new(),
+            encrypted_output_offset: 0,
             read_seq: 0,
             write_seq: 0,
         }
@@ -45,6 +50,8 @@ impl<S: AsyncRead + AsyncWrite + Unpin> TlsStream<S> {
             input_buffer: initial_data, // Use provided buffer
             decrypted_buffer: BytesMut::with_capacity(24 * 1024),
             write_buffer: BytesMut::with_capacity(16 * 1024 + 1024),
+            encrypted_output_buffer: BytesMut::new(),
+            encrypted_output_offset: 0,
             read_seq: 0,
             write_seq: 0,
         }
@@ -89,11 +96,32 @@ impl<S: AsyncRead + AsyncWrite + Unpin> TlsStream<S> {
 
     /// 将 write_buffer 中的明文数据打包加密并发送
     fn flush_write_buffer(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        // First, try to drain any pending encrypted output
+        while self.encrypted_output_offset < self.encrypted_output_buffer.len() {
+            match Pin::new(&mut self.stream).poll_write(
+                cx,
+                &self.encrypted_output_buffer[self.encrypted_output_offset..],
+            ) {
+                Poll::Ready(Ok(n)) => {
+                    self.encrypted_output_offset += n;
+                }
+                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                Poll::Pending => return Poll::Pending,
+            }
+        }
+
+        // Clear the encrypted buffer once fully written
+        if self.encrypted_output_offset > 0 {
+            self.encrypted_output_buffer.clear();
+            self.encrypted_output_offset = 0;
+        }
+
+        // If no plaintext to encrypt, we're done
         if self.write_buffer.is_empty() {
             return Poll::Ready(Ok(()));
         }
 
-        // 1. Encrypt accumulated plaintext
+        // Encrypt accumulated plaintext
         let encrypted_record =
             match self
                 .keys
@@ -103,48 +131,28 @@ impl<S: AsyncRead + AsyncWrite + Unpin> TlsStream<S> {
                 Err(e) => return Poll::Ready(Err(io::Error::new(io::ErrorKind::Other, e))),
             };
 
-        // 2. Write ALL encrypted bytes to underlying stream
-        // Note: For strict correctness, we should handle partial writes properly by keeping `encrypted_record` in a separate buffer.
-        // However, standard tokio AsyncWrite mostly handles the buffering internally or we assume the socket can take it.
-        // But to be safe and simple, we do a loop here - BEWARE: this blocks the task if socket full.
-        // A better approach is another encryption_buffer state. But for now, let's try direct write loop.
+        self.write_seq += 1;
+        self.write_buffer.clear();
 
-        // Actually, we can't loop-wait in Poll.
-        // We really need an `encrypted_output_buffer`.
-
-        // Let's rely on the assumption that for typical TLS record sizes (~16KB), the kernel socket buffer is likely sufficient.
-        // IF it returns Pending, we are in trouble because we lose the encrypted record.
-
-        // REVISION: We MUST just loop write here for simplicity in this minimal implementation, using `poll_write` repeatedly?
-        // No, that panics context.
-
-        // Let's implement a simplified "write all at once" for now.
-        // If this performance optimization is critical, we assume the underlying stream handles buffering (e.g. TCP).
-
-        // Or better: Let's assume poll_write handles the whole buffer or nothing/error.
-        // Most async IO implementations won't do partial writes on small buffers unless socket buffer is nearly full.
-
-        // Correct implementation for production:
-        // shift `write_buffer` -> `encrypted_buffer`.
-        // drain `encrypted_buffer` to `stream`.
-
-        // For this step, I'll do a direct write attempt.
+        // Try to write the encrypted record
         match Pin::new(&mut self.stream).poll_write(cx, &encrypted_record) {
             Poll::Ready(Ok(n)) => {
                 if n < encrypted_record.len() {
-                    // CRITICAL: Partial write of encrypted frame corrupts the stream.
-                    // We must return error.
-                    return Poll::Ready(Err(io::Error::new(
-                        io::ErrorKind::Other,
-                        "Partial TLS record write",
-                    )));
+                    // Partial write: save the rest for later
+                    self.encrypted_output_buffer = BytesMut::from(&encrypted_record[n..]);
+                    self.encrypted_output_offset = 0;
+                    Poll::Ready(Ok(()))
+                } else {
+                    Poll::Ready(Ok(()))
                 }
-                self.write_seq += 1;
-                self.write_buffer.clear();
-                Poll::Ready(Ok(()))
             }
             Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
-            Poll::Pending => Poll::Pending,
+            Poll::Pending => {
+                // Socket not ready: save encrypted data for later
+                self.encrypted_output_buffer = BytesMut::from(&encrypted_record[..]);
+                self.encrypted_output_offset = 0;
+                Poll::Pending
+            }
         }
     }
 }
@@ -231,15 +239,29 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncWrite for TlsStream<S> {
     ) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
 
-        // Add to buffer
-        this.write_buffer.extend_from_slice(buf);
-
-        // Try to flush immediately to reduce latency
-        if let Err(e) = std::task::ready!(this.flush_write_buffer(cx)) {
-            return Poll::Ready(Err(e));
+        // First, try to drain any pending encrypted output
+        if !this.encrypted_output_buffer.is_empty() {
+            match this.flush_write_buffer(cx) {
+                Poll::Ready(Ok(())) => {}
+                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                Poll::Pending => return Poll::Pending,
+            }
         }
 
-        Poll::Ready(Ok(buf.len()))
+        // Add to plaintext buffer (batch writes for efficiency)
+        this.write_buffer.extend_from_slice(buf);
+
+        // Only flush if buffer is getting large (14KB threshold)
+        if this.write_buffer.len() >= 14 * 1024 {
+            match this.flush_write_buffer(cx) {
+                Poll::Ready(Ok(())) => Poll::Ready(Ok(buf.len())),
+                Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
+                Poll::Pending => Poll::Pending,
+            }
+        } else {
+            // Buffer the write, will flush on explicit flush() or shutdown()
+            Poll::Ready(Ok(buf.len()))
+        }
     }
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {

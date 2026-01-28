@@ -33,8 +33,23 @@ where
                 Ok(())
             },
             Err(e) => {
-                debug!("连接断开: {}", e);
-                Ok(())
+                // Check if it's a normal disconnection or a critical error
+                let error_kind = e.kind();
+                match error_kind {
+                    std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::ConnectionAborted
+                    | std::io::ErrorKind::BrokenPipe
+                    | std::io::ErrorKind::UnexpectedEof => {
+                        // Normal disconnection
+                        debug!("连接断开: {}", e);
+                        Ok(())
+                    }
+                    _ => {
+                        // Critical error (e.g., "Partial TLS record write")
+                        error!("连接错误: {:?} - {}", error_kind, e);
+                        Err(e.into())
+                    }
+                }
             }
         }
     }
