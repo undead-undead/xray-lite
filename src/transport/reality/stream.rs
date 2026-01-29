@@ -245,29 +245,33 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncWrite for TlsStream<S> {
     ) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
 
-        // First, try to drain any pending encrypted output
+        // 1. Backpressure: If we have pending encrypted data that couldn't be sent,
+        // we must wait until it's sent before accepting more plaintext.
+        // This prevents memory explosion if the socket is blocked.
         if !this.encrypted_output_buffer.is_empty() {
             match this.flush_write_buffer(cx) {
-                Poll::Ready(Ok(())) => {}
+                Poll::Ready(Ok(())) => {} // Buffer drained, we can continue
                 Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
-                Poll::Pending => return Poll::Pending,
+                Poll::Pending => return Poll::Pending, // Socket busy, push backpressure to caller
             }
         }
 
-        // Add to plaintext buffer (batch writes for efficiency)
+        // 2. Add to plaintext buffer
         this.write_buffer.extend_from_slice(buf);
 
-        // Flush if buffer reaches 4KB threshold (balances latency vs efficiency)
-        // Lower than 14KB to avoid delays on initial YouTube video requests
-        if this.write_buffer.len() >= 4 * 1024 {
-            match this.flush_write_buffer(cx) {
-                Poll::Ready(Ok(())) => Poll::Ready(Ok(buf.len())),
-                Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
-                Poll::Pending => Poll::Pending,
+        // 3. Try to flush immediately
+        // IMPORTANT: We ignore Pending here because we already buffered the data.
+        // If we return Pending now, the caller will retry with the SAME data, causing duplication!
+        // The backpressure in step 1 handles flow control for the NEXT packet.
+        match this.flush_write_buffer(cx) {
+            Poll::Ready(Ok(())) => Poll::Ready(Ok(buf.len())),
+            Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
+            Poll::Pending => {
+                // We buffered the data but couldn't send it yet.
+                // Return Ok(n) so caller knows we accepted it.
+                // Next call to poll_write will hit Step 1 and wait if needed.
+                Poll::Ready(Ok(buf.len()))
             }
-        } else {
-            // Buffer the write, will flush on explicit flush() or shutdown()
-            Poll::Ready(Ok(buf.len()))
         }
     }
 
