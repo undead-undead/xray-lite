@@ -36,6 +36,41 @@ pub struct VlessRequest {
 }
 
 impl VlessRequest {
+    /// 检查请求是否完整（不消耗 buffer）
+    /// 用于流式读取判断，防止分包导致解码失败
+    pub fn check_len(buf: &[u8]) -> Result<Option<usize>> {
+        // 1. Fixed Header: Version(1) + UUID(16) + AddonLen(1) = 18 bytes
+        if buf.len() < 18 {
+            return Ok(None);
+        }
+
+        // Addon Length
+        let addon_len = buf[17] as usize;
+        let offset_command = 18 + addon_len;
+
+        // Check Command byte
+        if buf.len() < offset_command + 1 {
+            return Ok(None);
+        }
+
+        // 2. Command Check (Optional: Peek command type)
+        // let command = buf[offset_command];
+        // If command is Mux, we might want to just pass it through?
+        // But let's verify Address first for standard requests.
+
+        // 3. Address Check
+        let offset_address = offset_command + 1;
+        let addr_bytes = &buf[offset_address..]; // Slice from address start
+
+        match Address::check_len(addr_bytes)? {
+            Some(addr_len) => {
+                let total_len = offset_address + addr_len;
+                Ok(Some(total_len))
+            }
+            None => Ok(None),
+        }
+    }
+
     /// 从字节流解码请求
     pub fn decode(buf: &mut BytesMut, allowed_uuids: &[Uuid]) -> Result<Self> {
         // 检查最小长度: version(1) + uuid(16) + addon_length(1) + command(1) + port(2) + addr_type(1)

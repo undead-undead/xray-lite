@@ -18,46 +18,56 @@ pub async fn serve_vless(
     use tokio::io::AsyncReadExt;
     use tokio::time::{timeout, Duration};
     
-    // 第一次读取，5秒超时
-    let read_result = timeout(Duration::from_secs(30), stream.read_buf(&mut buf)).await;
-    
-    match read_result {
-        Ok(Ok(0)) => {
-            info!("客户端在发送VLESS请求前关闭了连接");
-            return Ok(());
-        },
-        Ok(Ok(n)) => {
-            debug!("📦 读取了 {} 字节的 VLESS 数据", n);
-        },
-        Ok(Err(e)) => return Err(e.into()),
-        Err(_) => {
-            error!("读取 VLESS 请求超时");
-            return Err(anyhow::anyhow!("Read timeout"));
-        }
-    }
-
-    let request = match codec.decode_request(&mut buf) {
-        Ok(req) => req,
-        Err(e) => {
-            // 检查是否是 HTTP 探测请求
-            let buf_slice = &buf[..];
-            let is_http_probe = buf_slice.windows(4).any(|w| 
-                w == b"GET " || w == b"POST"
-            ) || buf_slice.windows(4).any(|w| w == b"HEAD");
-            
-            if is_http_probe {
-                let peek_len = buf.len().min(64);
-                let peek = String::from_utf8_lossy(&buf[..peek_len]).replace("\r", "\\r").replace("\n", "\\n");
-                info!("🔍 检测到 HTTP 探测请求 ({} bytes): \"{}\"", buf.len(), peek);
-                use tokio::io::AsyncWriteExt;
-                let _ = stream.write_all(b"HTTP/1.1 204 No Content\r\n\r\n").await;
-                return Ok(());
+    // 读取循环：支持分包处理 (Robust 5G Fix / Telegram Compatible)
+    let request = loop {
+        // 先检查数据完整性（不消耗 buffer）
+        match codec.check_request_completeness(&buf) {
+            Ok(Some(_valid_len)) => {
+                // 数据看起来完整，尝试解码
+                match codec.decode_request(&mut buf) {
+                    Ok(req) => break req,
+                    Err(e) => {
+                        // 虽然 check 过了，但在 decode 阶段还是发现了逻辑错误 (或者消费 buffer 时出错)
+                        // 通常 check_len 只检查长度，decode 检查语义
+                         let bytes_read = buf.len();
+                         let hex_dump = hex::encode(&buf[..bytes_read.min(128)]);
+                         error!("❌ VLESS 解码失败 (Check passed): {}. Bytes: {} Hex: {}", e, bytes_read, hex_dump);
+                         return Err(e);
+                    }
+                }
             }
-            
-            let bytes_read = buf.len();
-            let hex_dump = hex::encode(&buf[..bytes_read.min(128)]);
-            error!("❌ VLESS 解码失败: {}. Bytes: {} Hex: {}", e, bytes_read, hex_dump);
-            return Err(e);
+            Ok(None) => {
+                // 数据不足，继续读取
+                // 设置超时，防止一直等待
+                match timeout(Duration::from_secs(30), stream.read_buf(&mut buf)).await {
+                    Ok(Ok(0)) => return Err(anyhow::anyhow!("Client closed connection (Incomplete Request)")),
+                    Ok(Ok(_n)) => continue, // 读到新数据，重试检查
+                    Ok(Err(e)) => return Err(e.into()),
+                    Err(_) => return Err(anyhow::anyhow!("Read timeout waiting for VLESS request")),
+                }
+            }
+            Err(e) => {
+                // Check 阶段就发现格式错误 (e.g. Version mismatch, UUID invalid)
+                // 检查是否是 HTTP 探测请求
+                let buf_slice = &buf[..];
+                let is_http_probe = buf_slice.windows(4).any(|w| 
+                    w == b"GET " || w == b"POST"
+                ) || buf_slice.windows(4).any(|w| w == b"HEAD");
+                
+                if is_http_probe {
+                    let peek_len = buf.len().min(64);
+                    let peek = String::from_utf8_lossy(&buf[..peek_len]).replace("\r", "\\r").replace("\n", "\\n");
+                    info!("🔍 检测到 HTTP 探测请求 ({} bytes): \"{}\"", buf.len(), peek);
+                    use tokio::io::AsyncWriteExt;
+                    let _ = stream.write_all(b"HTTP/1.1 204 No Content\r\n\r\n").await;
+                    return Ok(());
+                }
+                
+                let bytes_read = buf.len();
+                let hex_dump = hex::encode(&buf[..bytes_read.min(128)]);
+                error!("❌ VLESS 格式错误: {}. Bytes: {} Hex: {}", e, bytes_read, hex_dump);
+                return Err(e);
+            }
         }
     };
 

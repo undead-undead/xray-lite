@@ -14,6 +14,52 @@ pub enum Address {
 }
 
 impl Address {
+    /// 检查地址编码长度（不消耗 buffer）
+    /// 返回: Ok(Some(len)) 表示完整长度, Ok(None) 表示数据不足, Err 表示类型错误
+    pub fn check_len(buf: &[u8]) -> Result<Option<usize>> {
+        if buf.len() < 3 {
+            return Ok(None);
+        }
+
+        // buf[0], buf[1] are Port
+        let addr_type = buf[2];
+        let base_len = 3;
+
+        match addr_type {
+            // IPv4: 3 + 4 = 7
+            0x01 => {
+                if buf.len() < 7 {
+                    Ok(None)
+                } else {
+                    Ok(Some(7))
+                }
+            }
+            // Domain: 3 + 1 + len
+            0x02 => {
+                if buf.len() < 4 {
+                    return Ok(None);
+                }
+                let len = buf[3] as usize;
+                let total = 4 + len;
+                if buf.len() < total {
+                    Ok(None)
+                } else {
+                    Ok(Some(total))
+                }
+            }
+            // IPv6: 3 + 16 = 19
+            0x03 => {
+                if buf.len() < 19 {
+                    Ok(None)
+                } else {
+                    Ok(Some(19))
+                }
+            }
+            // Unknown
+            _ => Err(anyhow!("未知的地址类型: {}", addr_type)),
+        }
+    }
+
     /// 从字节流解析地址
     pub fn decode(buf: &mut BytesMut) -> Result<Self> {
         if buf.remaining() < 3 {
