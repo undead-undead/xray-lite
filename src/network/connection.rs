@@ -24,28 +24,39 @@ where
 
     /// 双向数据转发
     pub async fn relay(mut self) -> Result<()> {
-        debug!("开始双向数据转发 (使用 tokio::io::copy_bidirectional)");
+        debug!("开始双向数据转发 (Standard Copy)");
 
-        // 直接使用 Tokio 的双向拷贝优化
-        match tokio::io::copy_bidirectional(&mut self.client_stream, &mut self.remote_stream).await {
-            Ok((from_client, from_remote)) => {
-                debug!("连接结束: 客户端->远程 {} 字节, 远程->客户端 {} 字节", from_client, from_remote);
+        let (mut cr, mut cw) = tokio::io::split(self.client_stream);
+        let (mut rr, mut rw) = tokio::io::split(self.remote_stream);
+
+        let client_to_remote = async {
+            let n = tokio::io::copy(&mut cr, &mut rw).await?;
+            tokio::io::AsyncWriteExt::shutdown(&mut rw).await?;
+            Ok::<u64, std::io::Error>(n)
+        };
+
+        let remote_to_client = async {
+            let n = tokio::io::copy(&mut rr, &mut cw).await?;
+            tokio::io::AsyncWriteExt::shutdown(&mut cw).await?;
+            Ok::<u64, std::io::Error>(n)
+        };
+
+        match tokio::try_join!(client_to_remote, remote_to_client) {
+            Ok((c2r, r2c)) => {
+                debug!("连接结束: 客户端->远程 {} 字节, 远程->客户端 {} 字节", c2r, r2c);
                 Ok(())
-            },
+            }
             Err(e) => {
-                // Check if it's a normal disconnection or a critical error
                 let error_kind = e.kind();
                 match error_kind {
                     std::io::ErrorKind::ConnectionReset
                     | std::io::ErrorKind::ConnectionAborted
                     | std::io::ErrorKind::BrokenPipe
                     | std::io::ErrorKind::UnexpectedEof => {
-                        // Normal disconnection
                         debug!("连接断开: {}", e);
                         Ok(())
                     }
                     _ => {
-                        // Critical error (e.g., "Partial TLS record write")
                         error!("连接错误: {:?} - {}", error_kind, e);
                         Err(e.into())
                     }
