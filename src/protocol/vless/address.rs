@@ -91,17 +91,43 @@ impl Address {
             }
             // Mux 0x00 ?? (Rarely used in VLESS standard but supported in some cores)
             // Let's keep it assuming your implementation needs it, but handle partial
+            // Mux 0x00 ?? (Rarely used in VLESS standard but supported in some cores)
+            // Let's keep it assuming your implementation needs it, but handle partial
             0x00 => {
-                // Port(2) + Type(1) + Session(1) = 4 minimum
+                // Format: Port(2) + Type(1) + Session(1) = 4 bytes minimum
+                // Followed by actual address
                 if buf.remaining() < 4 {
                     return Ok(None);
                 }
-                // We need to recursively check the inner address
-                // This is tricky for streaming. We might need to implement a "Check" method first.
-                // For now, let's just return Err for Mux if it's too complex, or implement minimal check.
-                return Err(anyhow!(
-                    "Mux nested decode not supported in streaming mode yet"
-                ));
+
+                // We don't need to read SessionID for address decoding, but we need to know where nested addr starts.
+                // Nested address starts at index 4 (0,1=Port, 2=Type, 3=SessionID)
+
+                // Make a view of the remaining buffer starting from the nested address
+                // We rely on the fact that decode() uses indexing and doesn't consume if incomplete
+                let mut nested_buf = BytesMut::from(&buf[4..]);
+
+                // Recursively check if the nested address is complete.
+                // Note: 'nested_buf' is a COPY of the data (shallow cow copy), so modifying it in decode
+                // won't affect 'buf'. Wait, BytesMut::from(&[u8]) copies data!
+                // This is slightly inefficient (mem copy) but safe and correct for logic check.
+                // Given Mux headers are small, it's acceptable.
+
+                match Self::decode(&mut nested_buf)? {
+                    Some(real_addr) => {
+                        // Nested address is complete.
+                        // Calculate consumed length:
+                        // Original nested_buf length - remaining length after decode
+                        let original_nested_len = buf.len() - 4;
+                        let consumed_nested = original_nested_len - nested_buf.len();
+
+                        // Advance main buffer: 4 (Header) + consumed_nested
+                        buf.advance(4 + consumed_nested);
+
+                        Ok(Some(real_addr))
+                    }
+                    None => Ok(None), // Nested data incomplete
+                }
             }
             _ => Err(anyhow!("未知的地址类型: {}", addr_type)),
         }
