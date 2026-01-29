@@ -103,6 +103,12 @@ impl<S: AsyncRead + AsyncWrite + Unpin> TlsStream<S> {
                 &self.encrypted_output_buffer[self.encrypted_output_offset..],
             ) {
                 Poll::Ready(Ok(n)) => {
+                    if n == 0 {
+                        return Poll::Ready(Err(io::Error::new(
+                            io::ErrorKind::WriteZero,
+                            "failed to write whole buffer",
+                        )));
+                    }
                     self.encrypted_output_offset += n;
                 }
                 Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
