@@ -183,13 +183,23 @@ impl RealityServerRustls {
 
         // 尝试从缓存获取
         {
-            let mut cache = CERT_CACHE.lock().unwrap();
-            if let Some((cert_bytes, key_bytes)) = cache.get(&key) {
-                // Reconstruct from cached bytes
-                let cert: CertificateDer<'static> = CertificateDer::from(cert_bytes.clone());
-                let key_inner: PrivatePkcs8KeyDer<'static> = PrivatePkcs8KeyDer::from(key_bytes.clone());
-                let key: PrivateKeyDer<'static> = PrivateKeyDer::Pkcs8(key_inner);
-                return Ok((cert, key));
+            match CERT_CACHE.lock() {
+                Ok(mut cache) => {
+                    if let Some((cert_bytes, key_bytes)) = cache.get(&key) {
+                        // Reconstruct from cached bytes
+                        let cert: CertificateDer<'static> = CertificateDer::from(cert_bytes.clone());
+                        let key_inner: PrivatePkcs8KeyDer<'static> = PrivatePkcs8KeyDer::from(key_bytes.clone());
+                        let key: PrivateKeyDer<'static> = PrivateKeyDer::Pkcs8(key_inner);
+                        return Ok((cert, key));
+                    }
+                }
+                Err(poisoned) => {
+                    // Mutex was poisoned, recover by clearing the cache
+                    warn!("CERT_CACHE Mutex poisoned, recovering...");
+                    let mut cache = poisoned.into_inner();
+                    cache.clear();
+                    // Continue to generate new cert
+                }
             }
         }
 
@@ -220,8 +230,18 @@ impl RealityServerRustls {
         
         // 存入缓存 (存储原始字节)
         {
-            let mut cache = CERT_CACHE.lock().unwrap();
-            cache.put(key, (cert_der.clone(), priv_key_der.clone()));
+            match CERT_CACHE.lock() {
+                Ok(mut cache) => {
+                    cache.put(key, (cert_der.clone(), priv_key_der.clone()));
+                }
+                Err(poisoned) => {
+                    // Mutex was poisoned, recover and try to store
+                    warn!("CERT_CACHE Mutex poisoned when storing, recovering...");
+                    let mut cache = poisoned.into_inner();
+                    cache.clear();
+                    cache.put(key, (cert_der.clone(), priv_key_der.clone()));
+                }
+            }
         }
 
 
