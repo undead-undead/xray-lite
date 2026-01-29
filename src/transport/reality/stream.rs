@@ -197,12 +197,16 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncRead for TlsStream<S> {
             }
 
             // Read from underlying stream
-            if this.input_buffer.capacity() < 1024 {
+            // Read from underlying stream
+            // FIX: Use remaining_mut() to check ACTUAL free space, not total capacity!
+            if this.input_buffer.remaining_mut() < 1024 {
                 this.input_buffer.reserve(4096);
             }
 
             let dest = this.input_buffer.chunk_mut();
             // Safety: converting UninitSlice to &mut [MaybeUninit<u8>] manually
+            // This is required because BytesMut doesn't expose a clean way to get &mut [MaybeUninit<u8>] until recently.
+            // We ensure dest.len() is correct.
             let slice = unsafe {
                 std::slice::from_raw_parts_mut(
                     dest.as_mut_ptr() as *mut std::mem::MaybeUninit<u8>,
@@ -215,7 +219,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncRead for TlsStream<S> {
                 Poll::Ready(Ok(())) => {
                     let n = read_buf.filled().len();
                     if n == 0 {
-                        // EOF, but make sure we processed everything
+                        // EOF
                         if this.input_buffer.is_empty() {
                             return Poll::Ready(Ok(()));
                         } else {
