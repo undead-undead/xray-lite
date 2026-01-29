@@ -73,7 +73,10 @@ pub async fn serve_vless(
 
     // 根据命令类型处理
     match request.command {
-        Command::Tcp => {
+        Command::Tcp | Command::Mux => {
+            if request.command == Command::Mux {
+                info!("⚠️ Experimental: Passing Mux traffic as TCP/Raw");
+            }
             let mut target_address = request.address.to_string();
             let mut initial_data = Vec::new();
 
@@ -246,10 +249,7 @@ pub async fn serve_vless(
             }
             info!("📡 UDP 会话结束");
         }
-        Command::Mux => {
-            use tracing::warn;
-            warn!("Mux 暂不支持");
-        }
+
     }
 
     Ok(())
