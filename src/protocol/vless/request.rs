@@ -45,54 +45,77 @@ pub struct VlessRequest {
 }
 
 impl VlessRequest {
-    /// 从字节流解码请求
-    pub fn decode(buf: &mut BytesMut, allowed_uuids: &[Uuid]) -> Result<Self> {
-        // 检查最小长度: version(1) + uuid(16) + addon_length(1) + command(1) + port(2) + addr_type(1)
-        if buf.remaining() < 22 {
-            return Err(anyhow!("缓冲区太小，无法解码 VLESS 请求"));
+    /// 从字节流解码请求 (支持流式解码)
+    /// 返回: Ok(Some(req)) 成功, Ok(None) 数据不足, Err 格式错误
+    pub fn decode(buf: &mut BytesMut, allowed_uuids: &[Uuid]) -> Result<Option<Self>> {
+        // 1. Check minimal fixed length:
+        // Version(1) + UUID(16) + AddonLen(1) = 18 bytes
+        if buf.len() < 18 {
+            return Ok(None);
         }
 
-        // 读取版本
-        let version = buf.get_u8();
+        // Peek Version
+        let version = buf[0];
         if version != VLESS_VERSION {
             return Err(anyhow!("不支持的 VLESS 版本: {}", version));
         }
 
-        // 读取 UUID (16 字节)
+        // Peek UUID
         let mut uuid_bytes = [0u8; 16];
-        buf.copy_to_slice(&mut uuid_bytes);
+        uuid_bytes.copy_from_slice(&buf[1..17]);
         let uuid = Uuid::from_bytes(uuid_bytes);
 
-        // 验证 UUID
         if !allowed_uuids.contains(&uuid) {
             return Err(anyhow!("未授权的 UUID: {}", uuid));
         }
 
-        // 读取附加数据长度
-        let addon_length = buf.get_u8();
+        // Peek Addon Length
+        let addon_len = buf[17] as usize;
 
-        // 跳过附加数据
-        if buf.remaining() < addon_length as usize {
-            return Err(anyhow!("缓冲区太小，无法跳过附加数据"));
+        // 2. Check length after Addon + Command(1)
+        // Fixed(18) + Addon(N) + Command(1) = 19 + N
+        let offset_command = 18 + addon_len;
+        if buf.len() < offset_command + 1 {
+            return Ok(None);
         }
-        buf.advance(addon_length as usize);
 
-        // 读取命令
-        if buf.remaining() < 1 {
-            return Err(anyhow!("缓冲区太小，无法读取命令"));
-        }
-        let command = Command::from_u8(buf.get_u8())?;
+        // Peek Command
+        let command_byte = buf[offset_command];
+        let command = Command::from_u8(command_byte)?;
 
-        // 读取目标地址
-        let address = Address::decode(buf)?;
+        // 3. Check Address
+        // Address starts at: 18 + addon_len + 1
+        let offset_address = offset_command + 1;
 
-        Ok(VlessRequest {
+        // Use a view of the buffer for address decoding to avoid advancing main buffer
+        // BytesMut::split_off is destructive, so we just pass a slice copy or use a temporary cursor logic?
+        // Address::decode expects &mut BytesMut and advances it.
+        // We can temporarily clone the remaining bytes to check if address is complete.
+        // This is slightly inefficient but safe.
+        // Optimization: slice buffer without copying?
+
+        let mut addr_buf = BytesMut::from(&buf[offset_address..]);
+
+        let address = match Address::decode(&mut addr_buf)? {
+            Some(addr) => addr,
+            None => return Ok(None),
+        };
+
+        // Calculate total length consumed
+        // original len - remaining len in addr_buf = address length
+        let addr_len = buf.len() - offset_address - addr_buf.len();
+        let total_len = offset_address + addr_len;
+
+        // 4. All good, consume buffer
+        buf.advance(total_len);
+
+        Ok(Some(VlessRequest {
             version,
             uuid,
             command,
             address,
-            addon_length,
-        })
+            addon_length: addon_len as u8,
+        }))
     }
 
     /// 将请求编码为字节流

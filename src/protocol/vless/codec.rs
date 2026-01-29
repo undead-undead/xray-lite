@@ -18,7 +18,7 @@ impl VlessCodec {
     }
 
     /// 解码 VLESS 请求
-    pub fn decode_request(&self, buf: &mut BytesMut) -> Result<VlessRequest> {
+    pub fn decode_request(&self, buf: &mut BytesMut) -> Result<Option<VlessRequest>> {
         VlessRequest::decode(buf, &self.allowed_uuids)
     }
 
