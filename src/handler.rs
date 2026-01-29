@@ -18,46 +18,46 @@ pub async fn serve_vless(
     use tokio::io::AsyncReadExt;
     use tokio::time::{timeout, Duration};
     
-    // 读取循环：支持分包处理
-    let request = loop {
-        match codec.decode_request(&mut buf) {
-            Ok(Some(req)) => break req,
-            Ok(None) => {
-                // 数据不足，继续读取
-                // 设置超时，防止一直等待
-                match timeout(Duration::from_secs(30), stream.read_buf(&mut buf)).await {
-                    Ok(Ok(0)) => return Err(anyhow::anyhow!("Connection closed by client before VLESS request complete")),
-                    Ok(Ok(_n)) => continue, // 读到数据了，尝试再次解码
-                    Ok(Err(e)) => return Err(e.into()),
-                    Err(_) => return Err(anyhow::anyhow!("Read timeout waiting for VLESS request")),
-                }
+    // 第一次读取，5秒超时
+    let read_result = timeout(Duration::from_secs(30), stream.read_buf(&mut buf)).await;
+    
+    match read_result {
+        Ok(Ok(0)) => {
+            info!("客户端在发送VLESS请求前关闭了连接");
+            return Ok(());
+        },
+        Ok(Ok(n)) => {
+            debug!("📦 读取了 {} 字节的 VLESS 数据", n);
+        },
+        Ok(Err(e)) => return Err(e.into()),
+        Err(_) => {
+            error!("读取 VLESS 请求超时");
+            return Err(anyhow::anyhow!("Read timeout"));
+        }
+    }
+
+    let request = match codec.decode_request(&mut buf) {
+        Ok(req) => req,
+        Err(e) => {
+            // 检查是否是 HTTP 探测请求
+            let buf_slice = &buf[..];
+            let is_http_probe = buf_slice.windows(4).any(|w| 
+                w == b"GET " || w == b"POST"
+            ) || buf_slice.windows(4).any(|w| w == b"HEAD");
+            
+            if is_http_probe {
+                let peek_len = buf.len().min(64);
+                let peek = String::from_utf8_lossy(&buf[..peek_len]).replace("\r", "\\r").replace("\n", "\\n");
+                info!("🔍 检测到 HTTP 探测请求 ({} bytes): \"{}\"", buf.len(), peek);
+                use tokio::io::AsyncWriteExt;
+                let _ = stream.write_all(b"HTTP/1.1 204 No Content\r\n\r\n").await;
+                return Ok(());
             }
-            Err(e) => {
-                // 检查是否是 HTTP 探测请求 (Only check on first significant error or if we have enough bytes to guess)
-                let buf_slice = &buf[..];
-                // Try to detect HTTP even if VLESS decode failed
-                let is_http_probe = buf_slice.len() > 3 && (
-                    buf_slice.starts_with(b"GET ") || 
-                    buf_slice.starts_with(b"POST") || 
-                    buf_slice.starts_with(b"HEAD") ||
-                    buf_slice.starts_with(b"PUT ") ||
-                    buf_slice.starts_with(b"conn") // CONNECT
-                );
-                
-                if is_http_probe {
-                    let peek_len = buf.len().min(64);
-                    let peek = String::from_utf8_lossy(&buf[..peek_len]).replace("\r", "\\r").replace("\n", "\\n");
-                    info!("🔍 检测到 HTTP 探测请求 ({} bytes): \"{}\"", buf.len(), peek);
-                    use tokio::io::AsyncWriteExt;
-                    let _ = stream.write_all(b"HTTP/1.1 204 No Content\r\n\r\n").await;
-                    return Ok(());
-                }
-                
-                let bytes_read = buf.len();
-                let hex_dump = hex::encode(&buf[..bytes_read.min(128)]);
-                error!("❌ VLESS 解码失败: {}. Bytes: {} Hex: {}", e, bytes_read, hex_dump);
-                return Err(e);
-            }
+            
+            let bytes_read = buf.len();
+            let hex_dump = hex::encode(&buf[..bytes_read.min(128)]);
+            error!("❌ VLESS 解码失败: {}. Bytes: {} Hex: {}", e, bytes_read, hex_dump);
+            return Err(e);
         }
     };
 
