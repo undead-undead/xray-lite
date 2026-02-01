@@ -24,24 +24,9 @@ where
 
     /// 双向数据转发
     pub async fn relay(mut self) -> Result<()> {
-        debug!("开始双向数据转发 (Standard Copy)");
+        debug!("开始双向数据转发 (copy_bidirectional)");
 
-        let (mut cr, mut cw) = tokio::io::split(self.client_stream);
-        let (mut rr, mut rw) = tokio::io::split(self.remote_stream);
-
-        let client_to_remote = async {
-            let n = tokio::io::copy(&mut cr, &mut rw).await?;
-            tokio::io::AsyncWriteExt::shutdown(&mut rw).await?;
-            Ok::<u64, std::io::Error>(n)
-        };
-
-        let remote_to_client = async {
-            let n = tokio::io::copy(&mut rr, &mut cw).await?;
-            tokio::io::AsyncWriteExt::shutdown(&mut cw).await?;
-            Ok::<u64, std::io::Error>(n)
-        };
-
-        match tokio::try_join!(client_to_remote, remote_to_client) {
+        match tokio::io::copy_bidirectional(&mut self.client_stream, &mut self.remote_stream).await {
             Ok((c2r, r2c)) => {
                 debug!("连接结束: 客户端->远程 {} 字节, 远程->客户端 {} 字节", c2r, r2c);
                 Ok(())

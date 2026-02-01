@@ -165,7 +165,7 @@ impl Server {
         };
 
         // 连接数限制 (防止 OOM)
-        const MAX_CONNECTIONS: usize = 4096;
+        const MAX_CONNECTIONS: usize = 10000;
         let connection_semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_CONNECTIONS));
         
         info!("🔒 最大并发连接数: {}", MAX_CONNECTIONS);

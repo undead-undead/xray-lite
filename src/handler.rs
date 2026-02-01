@@ -100,7 +100,7 @@ pub async fn serve_vless(
                 // 如果没有初始数据，尝试再次通过超时读取
                 if initial_data.is_empty() {
                     let mut temp_buf = vec![0u8; 16384];
-                    if let Ok(Ok(n)) = timeout(Duration::from_millis(500), stream.read(&mut temp_buf)).await {
+                    if let Ok(Ok(n)) = timeout(Duration::from_millis(200), stream.read(&mut temp_buf)).await {
                          if n > 0 {
                              initial_data.extend_from_slice(&temp_buf[..n]);
                              debug!("Sniffing: 读取了额外的 {} 字节", n);
