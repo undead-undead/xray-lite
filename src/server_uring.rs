@@ -81,7 +81,18 @@ impl UringServer {
             None
         };
 
+        // 连接数限制 (防止 OOM)
+        const MAX_CONNECTIONS: usize = 10000;
+        let connection_semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_CONNECTIONS));
+        info!("🔒 [io_uring] 最大并发连接数: {}", MAX_CONNECTIONS);
+
         loop {
+            // 获取连接许可
+            let permit = match connection_semaphore.clone().acquire_owned().await {
+                Ok(p) => p,
+                Err(_) => break,
+            };
+
             match listener.accept().await {
                 Ok((stream, addr)) => {
                     let codec = codec.clone();
@@ -89,12 +100,20 @@ impl UringServer {
                     let xhttp_server = xhttp_server.clone();
                     
                     monoio::spawn(async move {
+                        let _permit = permit; // 持有 permit 直到连接结束
                         if let Err(e) = Self::handle_client_native(stream, codec, reality_server, xhttp_server).await {
                             info!("连接 {} 结束: {}", addr, e);
                         }
                     });
                 }
-                Err(e) => error!("accept error: {}", e),
+                Err(e) => {
+                    if e.raw_os_error() == Some(24) { // EMFILE
+                        error!("❌ [io_uring] 系统文件句柄耗尽 (EMFILE)，等待 1 秒...");
+                        monoio::time::sleep(std::time::Duration::from_secs(1)).await;
+                        continue;
+                    }
+                    error!("accept error: {}", e);
+                }
             }
         }
     }

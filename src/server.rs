@@ -98,7 +98,18 @@ impl Server {
             None
         };
 
+        // 连接数限制 (防止 OOM)
+        const MAX_CONNECTIONS: usize = 10000;
+        let connection_semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_CONNECTIONS));
+        info!("🔒 最大并发连接数: {}", MAX_CONNECTIONS);
+
         loop {
+            // 获取连接许可
+            let permit = match connection_semaphore.clone().acquire_owned().await {
+                Ok(p) => p,
+                Err(_) => break,
+            };
+
             match listener.accept().await {
                 Ok((stream, addr)) => {
                     info!("📥 新连接来自: {}", addr);
@@ -111,12 +122,23 @@ impl Server {
                     let accept_proxy_protocol = inbound.stream_settings.sockopt.accept_proxy_protocol;
 
                     crate::utils::task::spawn(async move {
+                        let _permit = permit; // 持有 permit 直到连接结束
                         if let Err(e) = Self::handle_client(stream, codec, reality_server, xhttp_server, connection_manager, sniffing_enabled, tcp_no_delay, accept_proxy_protocol).await {
                             error!("客户端处理失败: {}", e);
                         }
                     });
                 }
-                Err(e) => error!("接受连接失败: {}", e),
+                Err(e) => {
+                    if e.kind() == std::io::ErrorKind::WouldBlock {
+                        continue;
+                    }
+                    if e.raw_os_error() == Some(24) { // EMFILE
+                        error!("❌ 系统文件句柄耗尽 (EMFILE)，等待 1 秒...");
+                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                        continue;
+                    }
+                    error!("接受连接失败: {}", e);
+                }
             }
         }
     }
