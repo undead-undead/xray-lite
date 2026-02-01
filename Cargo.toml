@@ -1,11 +1,15 @@
 [package]
 name = "xray-lite"
-version = "0.4.6"
+version = "0.6.0-beta1"
 edition = "2021"
 authors = ["Undead <undead-undead@github.com>"]
 description = "Lightweight VLESS+Reality+XHTTP proxy implementation in Rust, featuring anti-probing and raw pipe transport."
 license = "MIT"
 repository = "https://github.com/undead-undead/xray-lite"
+
+[features]
+default = []
+xdp = ["dep:aya", "dep:aya-log", "dep:env_logger"]
 
 [dependencies]
 # 异步运行时
@@ -68,7 +72,11 @@ rcgen = "0.12"
 tikv-jemallocator = "0.5"
 lru = "0.12"
 dashmap = "5.5"
-core_affinity = "0.8.3"
+
+# XDP Optional Dependencies
+aya = { version = "0.13", features = ["async_tokio"], optional = true }
+aya-log = { version = "0.2", optional = true }
+env_logger = { version = "0.10", optional = true }
 
 [dev-dependencies]
 criterion = "0.5"

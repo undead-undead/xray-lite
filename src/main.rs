@@ -10,6 +10,7 @@ mod server;
 mod transport;
 mod utils;
 mod handler;
+mod xdp;
 mod server_uring;
 
 use crate::config::Config;
@@ -30,14 +31,20 @@ struct Args {
     #[arg(short, long, default_value = "info")]
     log_level: String,
 
-    /// 启用高性能 io_uring 模式 (Requires Linux 5.10+)
+    /// 启用 XDP 内核级 TLS 预过滤 (Need Root + Kernel 5.4+)
+    #[arg(long, default_value_t = false)]
+    enable_xdp: bool,
+
+    /// XDP 绑定的网卡接口 (e.g., eth0)
+    #[arg(long, default_value = "eth0")]
+    xdp_iface: String,
+
+    /// 启用 io_uring 高性能运行时 (Linux 5.10+)
     #[arg(long, default_value_t = false)]
     uring: bool,
 }
 
 fn main() -> Result<()> {
-    let args = Args::parse();
-    
     // 提高文件句柄限制 (Linux)
     #[cfg(not(target_os = "windows"))]
     {
@@ -54,31 +61,18 @@ fn main() -> Result<()> {
         }
     }
 
+    let args = Args::parse();
+    
     if args.uring {
-        info!("⚡ Starting in high-efficiency io_uring mode");
+        info!("⚡ Using high-efficiency io_uring mode");
         use crate::utils::task::{set_runtime_mode, RuntimeMode};
         
-        // Use FusionDriver for better balance on 1-vCPU KVM
-        let mut rt = monoio::RuntimeBuilder::<monoio::FusionDriver>::new()
-            .enable_timer()
-            .with_entries(1024) 
-            .build()
-            .expect("Failed to build monoio runtime");
-
-        // Pin to ensure low context-switch overhead
-        if let Some(core_ids) = core_affinity::get_core_ids() {
-            if !core_ids.is_empty() {
-                core_affinity::set_for_current(core_ids[0]);
-                info!("📌 Affinity set to Core 0");
-            }
-        }
-
-        rt.block_on(async move {
+        monoio::start::<monoio::FusionDriver, _>(async move {
             set_runtime_mode(RuntimeMode::Monoio);
             async_main(args).await
         })
     } else {
-        info!("🧵 Starting in standard Tokio mode");
+        info!("🧵 Using standard Tokio mode");
         use crate::utils::task::{set_runtime_mode, RuntimeMode};
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -104,9 +98,28 @@ async fn async_main(args: Args) -> Result<()> {
 
     tracing_subscriber::fmt().with_max_level(log_level).with_target(false).init();
 
-    info!("🚀 Xray-Lite v0.4.6-stable [io_uring optimized]");
+    info!("🚀 Xray-Lite v0.6.0-beta1 [io_uring native]");
     let config = Config::load(&args.config)?;
     info!("✅ Configuration loaded successfully");
+
+    // Extract ports for XDP
+    let mut protected_ports = Vec::new();
+    for inbound in &config.inbounds {
+        protected_ports.push(inbound.port);
+    }
+
+    if args.enable_xdp || std::env::var("XRAY_XDP_ENABLE").is_ok() {
+        #[cfg(feature = "xdp")]
+        {
+            let iface = std::env::var("XRAY_XDP_IFACE").unwrap_or(args.xdp_iface);
+            info!("🔥 Attempting to load XDP Firewall on interface: {}", iface);
+            xdp::loader::start_xdp(&iface, protected_ports);
+        }
+        #[cfg(not(feature = "xdp"))]
+        {
+            tracing::warn!("⚠️  XDP was requested, but this binary was NOT compiled with XDP support.");
+        }
+    }
 
     if args.uring {
         let server = crate::server_uring::UringServer::new(config)?;
