@@ -217,6 +217,14 @@ impl Server {
                     });
                 }
                 Err(e) => {
+                    if e.kind() == std::io::ErrorKind::WouldBlock {
+                         continue;
+                    }
+                    if e.raw_os_error() == Some(24) { // EMFILE (Too many open files)
+                        error!("❌ 系统文件句柄耗尽 (EMFILE)，等待 1 秒...");
+                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                        continue;
+                    }
                     error!("接受连接失败: {}", e);
                 }
             }

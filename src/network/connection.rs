@@ -101,18 +101,19 @@ impl ConnectionManager {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         let active_connections = self.active_connections.clone();
+        let connection = ProxyConnection::new(client_stream, remote_stream);
+        
+        // 直接在当前任务中等待转发完成
+        // 注意：调用者 (如 server.rs 或 h2.rs) 已经在一个独立的 tokio task 中运行了，所以这里不需要再 spawn
+        let result = connection.relay().await;
+        
+        // 减少活跃连接计数
+        active_connections.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
 
-        // 在新任务中处理连接
-        tokio::spawn(async move {
-            let connection = ProxyConnection::new(client_stream, remote_stream);
-            
-            if let Err(e) = connection.relay().await {
-                error!("连接处理失败: {}", e);
-            }
-
-            // 减少活跃连接计数
-            active_connections.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
-        });
+        if let Err(e) = result {
+            error!("连接处理失败: {}", e);
+            return Err(e);
+        }
 
         Ok(())
     }

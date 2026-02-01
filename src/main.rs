@@ -41,6 +41,22 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // 提高文件句柄限制 (Linux)
+    #[cfg(not(target_os = "windows"))]
+    {
+        let mut limit = libc::rlimit {
+            rlim_cur: 65535,
+            rlim_max: 65535,
+        };
+        unsafe {
+            if libc::setrlimit(libc::RLIMIT_NOFILE, &limit) != 0 {
+                limit.rlim_cur = 4096;
+                limit.rlim_max = 4096;
+                libc::setrlimit(libc::RLIMIT_NOFILE, &limit);
+            }
+        }
+    }
+
     let args = Args::parse();
 
     // 初始化日志
