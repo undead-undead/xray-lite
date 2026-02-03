@@ -19,7 +19,7 @@ BLUE='\033[0;34m'
 NC='\033[0m'
 
 # Version / 版本
-VERSION="v0.6.0-xdp"
+VERSION="v0.4.6"
 REPO="undead-undead/xray-lite"
 
 echo -e "${BLUE}=========================================${NC}"
@@ -91,7 +91,11 @@ fi
 # Use the static single binary for all cases (it contains XDP logic internally)
 # 使用静态单一二进制 (内部包含 XDP 逻辑)
 if [ "$BINARY_ARCH" = "amd64" ] || [ "$BINARY_ARCH" = "x86_64" ]; then
-    XRAY_BINARY_NAME="xray-linux-amd64"
+    if [ "$SUPPORT_XDP" = true ]; then
+        XRAY_BINARY_NAME="vless-server-linux-x86_64-xdp"
+    else
+        XRAY_BINARY_NAME="vless-server-linux-x86_64"
+    fi
 else
     # Fallback for arm64 if we ever support it in static build
     XRAY_BINARY_NAME="vless-server-linux-${BINARY_ARCH}"
