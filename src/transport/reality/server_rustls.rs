@@ -71,19 +71,30 @@ impl RealityServerRustls {
     pub async fn accept<S>(&self, mut stream: S) -> Result<tokio_rustls::server::TlsStream<PrefixedStream<S>>> 
     where S: AsyncRead + AsyncWrite + Unpin + Send + 'static {
         let mut buffer = Vec::with_capacity(2048);
-        while buffer.len() < 5 {
-            let mut chunk = [0u8; 1024];
-            let n = stream.read(&mut chunk).await?;
-            if n == 0 { bail!("Connection closed early"); }
-            buffer.extend_from_slice(&chunk[..n]);
-        }
+        // 设置握手超时 (防止僵尸连接)
+        let handshake_timeout = std::time::Duration::from_secs(5);
 
-        let needed = if buffer[0] == 0x16 { 5 + u16::from_be_bytes([buffer[3], buffer[4]]) as usize } else { buffer.len() };
-        while buffer.len() < needed && buffer.len() < 16384 {
-             let mut chunk = [0u8; 1024];
-             let n = stream.read(&mut chunk).await?;
-             if n == 0 { break; }
-             buffer.extend_from_slice(&chunk[..n]);
+        let read_task = async {
+            while buffer.len() < 5 {
+                let mut chunk = [0u8; 1024];
+                let n = stream.read(&mut chunk).await?;
+                if n == 0 { bail!("Connection closed early"); }
+                buffer.extend_from_slice(&chunk[..n]);
+            }
+
+            let needed = if buffer[0] == 0x16 { 5 + u16::from_be_bytes([buffer[3], buffer[4]]) as usize } else { buffer.len() };
+            while buffer.len() < needed && buffer.len() < 16384 {
+                 let mut chunk = [0u8; 1024];
+                 let n = stream.read(&mut chunk).await?;
+                 if n == 0 { break; }
+                 buffer.extend_from_slice(&chunk[..n]);
+            }
+            Ok::<(), anyhow::Error>(())
+        };
+
+        match tokio::time::timeout(handshake_timeout, read_task).await {
+            Ok(result) => result?,
+            Err(_) => bail!("Handshake timeout: Client sent incomplete or no data"),
         }
 
         if let Ok(Some(info)) = hello_parser::parse_client_hello(&buffer) {
