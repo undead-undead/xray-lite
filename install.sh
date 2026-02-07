@@ -92,7 +92,7 @@ fi
 # 使用静态单一二进制 (内部包含 XDP 逻辑)
 if [ "$BINARY_ARCH" = "amd64" ] || [ "$BINARY_ARCH" = "x86_64" ]; then
     if [ "$SUPPORT_XDP" = true ]; then
-        XRAY_BINARY_NAME="vless-server-linux-x86_64-xdp"
+        XRAY_BINARY_NAME="xray-linux-amd64-xdp"
     else
         XRAY_BINARY_NAME="vless-server-linux-x86_64"
     fi
