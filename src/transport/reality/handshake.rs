@@ -5,12 +5,32 @@ use tokio::net::TcpStream;
 use tracing::{debug, info, warn, error};
 
 use super::tls::{ClientHello, TlsRecord};
-use super::RealityConfig;
+use super::{RealityAuth, RealityConfig, hello_parser};
 use super::crypto::{RealityCrypto, TlsKeys};
 
 #[derive(Clone)]
 pub struct RealityHandshake {
     config: RealityConfig,
+}
+
+struct HandshakeTranscript {
+    buffer: Vec<u8>,
+}
+
+impl HandshakeTranscript {
+    fn new(client_hello: &[u8]) -> Self {
+        Self { buffer: client_hello.to_vec() }
+    }
+
+    fn push(&mut self, msg: &[u8]) {
+        self.buffer.extend_from_slice(msg);
+    }
+
+    fn hash(&self) -> Vec<u8> {
+        let mut ctx = ring::digest::Context::new(&ring::digest::SHA256);
+        ctx.update(&self.buffer);
+        ctx.finish().as_ref().to_vec()
+    }
 }
 
 impl RealityHandshake {
@@ -19,36 +39,51 @@ impl RealityHandshake {
     }
 
     /// Reality 握手with认证验证和回落
+    /// Reality 握手with认证验证和回落
     pub async fn perform(&self, mut client_stream: TcpStream) -> Result<super::stream::TlsStream<TcpStream>> {
         // 1. 读取 ClientHello
-        let (client_hello, client_hello_raw) = self.read_client_hello(&mut client_stream).await?;
-        info!("ClientHello received, SNI: {:?}", client_hello.get_sni());
+        let mut buffer = BytesMut::with_capacity(2048);
+        while buffer.len() < 5 {
+            let n = client_stream.read_buf(&mut buffer).await?;
+            if n == 0 { return Err(anyhow!("Connection closed early")); }
+        }
+        if buffer[0] != 0x16 {
+            return self.fallback_to_dest(client_stream, &buffer).await;
+        }
+        let record_len = u16::from_be_bytes([buffer[3], buffer[4]]) as usize;
+        while buffer.len() < 5 + record_len {
+            let n = client_stream.read_buf(&mut buffer).await?;
+            if n == 0 { return Err(anyhow!("Connection closed early")); }
+        }
+
+        let info = hello_parser::parse_client_hello(&buffer)?
+            .ok_or_else(|| anyhow!("Not a valid ClientHello"))?;
+        
+        info!("ClientHello received, SNI: {:?}", info.server_name);
         
         // 2. 验证 Reality 认证
-        debug!("Client SessionID: {}", hex::encode(&client_hello.session_id));
-        debug!("Client Random: {}", hex::encode(&client_hello.random));
+        debug!("Client SessionID: {}", hex::encode(info.session_id));
+        debug!("Client Random: {}", hex::encode(info.client_random));
         
-        // TODO: 暂时禁用客户端认证，测试握手流程
-        let is_reality_client = true; // 临时：接受所有客户端
+        let auth = RealityAuth::new(&self.config.private_key)?;
+        let is_reality_client = auth.verify_client_auth(&info.client_random, info.session_id);
         
         debug!("Reality authentication result: {}", is_reality_client);
         
         if !is_reality_client {
             warn!("Reality authentication failed - falling back to dest");
-            return self.fallback_to_dest(client_stream, &client_hello_raw).await;
+            // 注意：fallback 需要去掉 TLS Record Header
+            return self.fallback_to_dest(client_stream, &buffer[5..5+record_len]).await;
         }
         
         info!("✅ Reality authentication successful!");
         
         // 3. 执行 Reality 握手（使用我们自己的密钥）
-        let client_key_share = match client_hello.get_key_share() {
-            Some(key) => key,
-            None => return Err(anyhow!("No X25519 key share")),
-        };
+        let client_key_share = info.public_key.ok_or_else(|| anyhow!("No X25519 key share"))?;
 
         let crypto = RealityCrypto::new();
         let my_public_key = crypto.get_public_key();
-        let shared_secret = crypto.derive_shared_secret(&client_key_share)?;
+        let shared_secret = crypto.derive_shared_secret(client_key_share)?;
 
         // 4. 构造 ServerHello（带 Reality 认证）
         use rand::RngCore;
@@ -56,12 +91,12 @@ impl RealityHandshake {
         rand::rngs::OsRng.fill_bytes(&mut server_random);
 
         let mut server_hello = super::tls::ServerHello::new_reality(
-            &client_hello.session_id,
+            info.session_id,
             server_random,
             &my_public_key
         )?;
         
-        server_hello.modify_for_reality(&self.config.private_key, &client_hello.random)?;
+        server_hello.modify_for_reality(&self.config.private_key, &info.client_random)?;
 
         // 5. 发送 ServerHello 和 CCS
         client_stream.write_all(&server_hello.encode()).await?;
@@ -69,44 +104,39 @@ impl RealityHandshake {
         debug!("ServerHello & CCS sent");
 
         // 6. 推导握手密钥
-        let transcript0 = vec![client_hello_raw.as_slice(), server_hello.handshake_payload()];
+        let client_hello_payload = &buffer[5..5+record_len];
+        let mut transcript = HandshakeTranscript::new(client_hello_payload);
+        transcript.push(server_hello.handshake_payload());
+        
         let (hs_keys, handshake_secret) = TlsKeys::derive_handshake_keys(
             &shared_secret, 
-            &super::crypto::hash_transcript(&transcript0)
+            &transcript.hash()
         )?;
         
         // 7. 发送加密握手消息（标准 TLS 1.3：EE + Cert + Fin）
         let ee_msg = vec![8, 0, 0, 2, 0, 0];
-        debug!("EncryptedExtensions plaintext: {}", hex::encode(&ee_msg));
         
         // Certificate 消息（空证书列表）
-        // 格式：Type(1) + Length(3) + CertReqCtx(1) + CertList(3)
         let cert_msg = vec![
             11,       // Type: Certificate
             0, 0, 4,  // Length: 4 bytes
             0,        // Certificate Request Context Length: 0
             0, 0, 0   // Certificate List Length: 0
         ];
-        debug!("Certificate plaintext: {}", hex::encode(&cert_msg));
         
-        let transcript1 = vec![
-            client_hello_raw.as_slice(),
-            server_hello.handshake_payload(),
-            &ee_msg,
-            &cert_msg
-        ];
-        let hash1 = super::crypto::hash_transcript(&transcript1);
-        debug!("Transcript hash (for Finished): {}", hex::encode(&hash1));
+        transcript.push(&ee_msg);
+        transcript.push(&cert_msg);
         
+        let hash1 = transcript.hash();
         let verify_data = TlsKeys::calculate_verify_data(&hs_keys.server_traffic_secret, &hash1)?;
-        debug!("Verify data: {}", hex::encode(&verify_data));
         
         let mut fin_msg = BytesMut::new();
         fin_msg.put_u8(20);
         let fin_len = verify_data.len() as u32;
         fin_msg.put_slice(&fin_len.to_be_bytes()[1..4]);
         fin_msg.put_slice(&verify_data);
-        debug!("Finished plaintext: {}", hex::encode(&fin_msg));
+        
+        transcript.push(&fin_msg);
         
         // 打包所有消息到一个 TLS Record
         let mut bundle = BytesMut::new();
@@ -114,10 +144,7 @@ impl RealityHandshake {
         bundle.put_slice(&cert_msg);
         bundle.put_slice(&fin_msg);
         
-        debug!("Bundled handshake messages (plaintext): {}", hex::encode(&bundle));
-        
         let bundled_record = hs_keys.encrypt_server_record(0, &bundle, 22)?;
-        debug!("Bundled handshake messages (encrypted): {}", hex::encode(&bundled_record));
         client_stream.write_all(&bundled_record).await?;
         
         info!("Server handshake complete, waiting for client Finished...");
@@ -165,14 +192,7 @@ impl RealityHandshake {
         }
         
         // 9. 推导应用层密钥
-        let transcript_app = vec![
-            client_hello_raw.as_slice(),
-            server_hello.handshake_payload(),
-            &ee_msg,
-            &cert_msg,
-            &fin_msg
-        ];
-        let app_keys = TlsKeys::derive_application_keys(&handshake_secret, &super::crypto::hash_transcript(&transcript_app))?;
+        let app_keys = TlsKeys::derive_application_keys(&handshake_secret, &transcript.hash())?;
         
         info!("🎉 Reality handshake successful! Tunnel established.");
         Ok(super::stream::TlsStream::new_with_buffer(client_stream, app_keys, buf))
@@ -212,20 +232,5 @@ impl RealityHandshake {
         
         // 返回错误，因为连接已经被转发
         Err(anyhow!("Connection fell back to dest"))
-    }
-
-    async fn read_client_hello(&self, stream: &mut TcpStream) -> Result<(ClientHello, Vec<u8>)> {
-        let mut buf = BytesMut::with_capacity(4096);
-        loop {
-            let n = stream.read_buf(&mut buf).await?;
-            if n == 0 { return Err(anyhow!("EOF reading CH")); }
-            let mut parse_buf = buf.clone();
-            if let Some(record) = TlsRecord::parse(&mut parse_buf)? {
-                if record.content_type == super::tls::ContentType::Handshake {
-                     let ch = ClientHello::parse(&record.payload)?;
-                     return Ok((ch, record.payload));
-                }
-            }
-        }
     }
 }

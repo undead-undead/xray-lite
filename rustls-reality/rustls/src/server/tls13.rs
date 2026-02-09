@@ -171,11 +171,24 @@ mod client_hello {
                     )
                 })?;
 
-            sigschemes_ext.retain(SignatureScheme::supported_in_tls13);
-            if self.config.reality_config.is_some()
-                && !sigschemes_ext.contains(&SignatureScheme::ED25519)
-            {
-                sigschemes_ext.push(SignatureScheme::ED25519);
+            if let Some(ref reality_config) = self.config.reality_config {
+                if !sigschemes_ext.contains(&SignatureScheme::ED25519) {
+                    sigschemes_ext.push(SignatureScheme::ED25519);
+                }
+
+                if reality_config.verify_client {
+                    if !crate::reality::verify_client(
+                        client_hello.session_id.get_data(),
+                        &self.randoms.client,
+                        reality_config,
+                    ) {
+                        warn!("Reality client verification failed");
+                        return Err(cx.common.send_fatal_alert(
+                            AlertDescription::HandshakeFailure,
+                            PeerIncompatible::NoKxGroupsInCommon,
+                        ));
+                    }
+                }
             }
 
             let shares_ext = client_hello
@@ -800,23 +813,9 @@ mod client_hello {
     ) -> Result<(), Error> {
         let message = construct_server_verify_message(&transcript.get_current_hash());
 
-        /*
-        std::eprintln!(
-            "REALITY_STDERR: emit_certificate_verify checks. Schemes: {:?}",
-            schemes
-        );
-        std::println!(
-            "REALITY_STDOUT: emit_certificate_verify checks. Schemes: {:?}",
-            schemes
-        );
-        */
-
         let signer = signing_key
             .choose_scheme(schemes)
-            .or_else(|| {
-                // std::eprintln!("REALITY_STDERR: Standard choose_scheme failed. Attempting force-fallback to ED25519.");
-                signing_key.choose_scheme(&[SignatureScheme::ED25519])
-            })
+            .or_else(|| signing_key.choose_scheme(&[SignatureScheme::ED25519]))
             .ok_or_else(|| {
                 common.send_fatal_alert(
                     AlertDescription::HandshakeFailure,

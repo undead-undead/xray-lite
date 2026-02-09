@@ -1,16 +1,16 @@
 use anyhow::{anyhow, Result};
 use bytes::Buf;
 
-pub struct ClientHelloInfo {
-    pub session_id: Vec<u8>,
+pub struct ClientHelloInfo<'a> {
+    pub session_id: &'a [u8],
     pub client_random: [u8; 32],
-    pub public_key: Option<Vec<u8>>,
-    pub server_name: Option<String>,
+    pub public_key: Option<&'a [u8]>,
+    pub server_name: Option<&'a str>,
 }
 
 /// 解析 ClientHello 消息，提取 SessionID, Random, X25519 Public Key 和 SNI
 /// 注意：这是一个最小化实现，仅用于 Reality 预检
-pub fn parse_client_hello(buf: &[u8]) -> Result<Option<ClientHelloInfo>> {
+pub fn parse_client_hello(buf: &[u8]) -> Result<Option<ClientHelloInfo<'_>>> {
     // 检查是否是 TLS Handshake (0x16)
     if buf.len() < 5 || buf[0] != 0x16 {
         return Ok(None); // 不是 TLS 握手
@@ -22,45 +22,39 @@ pub fn parse_client_hello(buf: &[u8]) -> Result<Option<ClientHelloInfo>> {
         return Ok(None); // 数据包不完整
     }
 
-    let mut cursor = &buf[5..]; // 跳过 Record Header
+    let handshake_payload = &buf[5..5 + record_len];
+    if handshake_payload.len() < 4 {
+        return Err(anyhow!("Short handshake payload"));
+    }
 
     // Handshake Header: Type(1) + Len(3)
-    if cursor.remaining() < 4 {
-        return Err(anyhow!("Short buffer"));
-    }
-    let msg_type = cursor.get_u8();
+    let msg_type = handshake_payload[0];
     if msg_type != 0x01 {
         // 0x01 = ClientHello
         return Ok(None);
     }
 
-    // 跳过 Handshake Length (3 bytes)
-    cursor.advance(3);
-
-    // ClientHello Version (2 bytes)
-    if cursor.remaining() < 2 {
-        return Err(anyhow!("Short buffer for Version"));
+    // Skip Handshake Header (4 bytes) and Version (2 bytes)
+    if handshake_payload.len() < 38 {
+        return Err(anyhow!("Short ClientHello"));
     }
-    cursor.advance(2);
 
     // Client Random (32 bytes)
-    if cursor.remaining() < 32 {
-        return Err(anyhow!("Short buffer for Random"));
-    }
     let mut client_random = [0u8; 32];
-    cursor.copy_to_slice(&mut client_random);
+    client_random.copy_from_slice(&handshake_payload[6..38]);
+
+    let mut cursor = &handshake_payload[38..];
 
     // Session ID
-    if cursor.remaining() < 1 {
+    if !cursor.has_remaining() {
         return Err(anyhow!("Short buffer for Session ID Len"));
     }
     let session_id_len = cursor.get_u8() as usize;
     if cursor.remaining() < session_id_len {
         return Err(anyhow!("Short buffer for Session ID"));
     }
-
-    let mut session_id = vec![0u8; session_id_len];
-    cursor.copy_to_slice(&mut session_id);
+    let session_id = &cursor[..session_id_len];
+    cursor.advance(session_id_len);
 
     // Cipher Suites
     if cursor.remaining() < 2 {
@@ -73,7 +67,7 @@ pub fn parse_client_hello(buf: &[u8]) -> Result<Option<ClientHelloInfo>> {
     cursor.advance(cipher_suites_len);
 
     // Compression Methods
-    if cursor.remaining() < 1 {
+    if !cursor.has_remaining() {
         return Err(anyhow!("Short buffer for Compression Methods Len"));
     }
     let compression_methods_len = cursor.get_u8() as usize;
@@ -84,7 +78,6 @@ pub fn parse_client_hello(buf: &[u8]) -> Result<Option<ClientHelloInfo>> {
 
     // Extensions
     if cursor.remaining() < 2 {
-        // No extensions?
         return Ok(Some(ClientHelloInfo {
             session_id,
             client_random,
@@ -117,7 +110,6 @@ pub fn parse_client_hello(buf: &[u8]) -> Result<Option<ClientHelloInfo>> {
 
         if ext_type == 0x0000 {
             // Server Name Indication (SNI)
-            // List Length (2)
             if ext_data.remaining() >= 2 {
                 let list_len = ext_data.get_u16() as usize;
                 if ext_data.remaining() >= list_len {
@@ -133,9 +125,7 @@ pub fn parse_client_hello(buf: &[u8]) -> Result<Option<ClientHelloInfo>> {
                         }
 
                         if name_type == 0x00 {
-                            let mut name_bytes = vec![0u8; name_len];
-                            list.copy_to_slice(&mut name_bytes);
-                            if let Ok(s) = String::from_utf8(name_bytes) {
+                            if let Ok(s) = std::str::from_utf8(&list[..name_len]) {
                                 server_name = Some(s);
                             }
                             break;
@@ -148,38 +138,29 @@ pub fn parse_client_hello(buf: &[u8]) -> Result<Option<ClientHelloInfo>> {
 
         // Key Share Extension (0x0033)
         if ext_type == 0x0033 {
-            // KeyShareClientHello format:
-            // client_shares_len (2 bytes)
-            // ClientShareEntry...
+            if ext_data.remaining() >= 2 {
+                let shares_len = ext_data.get_u16() as usize;
+                if ext_data.remaining() >= shares_len {
+                    let mut shares = &ext_data[..shares_len];
+                    while shares.has_remaining() {
+                        if shares.remaining() < 4 {
+                            break;
+                        }
+                        let group = shares.get_u16();
+                        let key_len = shares.get_u16() as usize;
 
-            if ext_data.remaining() < 2 {
-                continue;
-            }
-            let shares_len = ext_data.get_u16() as usize;
-            if ext_data.remaining() < shares_len {
-                continue;
-            }
+                        if shares.remaining() < key_len {
+                            break;
+                        }
 
-            let mut shares = &ext_data[..shares_len];
-            while shares.has_remaining() {
-                if shares.remaining() < 4 {
-                    break;
-                }
-                let group = shares.get_u16();
-                let key_len = shares.get_u16() as usize;
-
-                if shares.remaining() < key_len {
-                    break;
-                }
-
-                // Group X25519 is 0x001d
-                if group == 0x001d && key_len == 32 {
-                    let mut key = vec![0u8; 32];
-                    shares.copy_to_slice(&mut key);
-                    public_key = Some(key);
-                    break; // Found it
-                } else {
-                    shares.advance(key_len);
+                        // Group X25519 is 0x001d
+                        if group == 0x001d && key_len == 32 {
+                            public_key = Some(&shares[..32]);
+                            break;
+                        } else {
+                            shares.advance(key_len);
+                        }
+                    }
                 }
             }
         }

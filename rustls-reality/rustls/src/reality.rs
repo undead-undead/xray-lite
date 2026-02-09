@@ -70,6 +70,20 @@ pub fn inject_auth(
     Ok(())
 }
 
-pub fn verify_client(session_id: &[u8], _client_random: &[u8; 32], config: &RealityConfig) -> bool {
-    config.private_key.len() == 32 && session_id.len() == 32
+pub fn verify_client(session_id: &[u8], client_random: &[u8; 32], config: &RealityConfig) -> bool {
+    if session_id.len() < 8 || config.private_key.len() != 32 {
+        return false;
+    }
+
+    // The key is the session-specific AuthKey
+    let key = hmac::Key::new(hmac::HMAC_SHA256, &config.private_key);
+
+    // Reality client auth: HMAC-SHA256(Key=AuthKey, Msg=ClientRandom)
+    let tag = hmac::sign(&key, client_random);
+
+    // Constant-time comparison of the first 8 bytes
+    use subtle::ConstantTimeEq;
+    tag.as_ref()[..8]
+        .ct_eq(&session_id[..8])
+        .into()
 }

@@ -30,6 +30,7 @@ hyper-util = "0.1"
 
 # 加密
 ring = "0.17"
+subtle = "2.5"
 x25519-dalek = { version = "2.0", features = ["static_secrets", "getrandom"] }
 sha2 = "0.10"
 hkdf = "0.12"

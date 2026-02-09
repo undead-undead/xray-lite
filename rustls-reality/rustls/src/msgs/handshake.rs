@@ -176,6 +176,10 @@ impl SessionId {
         }
     }
 
+    pub fn get_data(&self) -> &[u8] {
+        &self.data[..self.len]
+    }
+
     #[cfg(feature = "tls12")]
     pub(crate) fn is_empty(&self) -> bool {
         self.len == 0

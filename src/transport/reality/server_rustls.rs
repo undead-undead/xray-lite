@@ -156,12 +156,12 @@ impl RealityServerRustls {
         bail!("Fallback total");
     }
  
-    fn verify_client_reality(&self, info: &ClientHelloInfo, full_hello: &[u8]) -> Option<(usize, [u8; 32])> {
+    fn verify_client_reality(&self, info: &ClientHelloInfo<'_>, full_hello: &[u8]) -> Option<(usize, [u8; 32])> {
         if info.session_id.len() != 32 || info.public_key.is_none() { return None; }
         
         let mut server_priv = [0u8; 32];
         server_priv.copy_from_slice(&self.reality_config.private_key);
-        let client_pub: [u8; 32] = info.public_key.as_ref()?.as_slice().try_into().ok()?;
+        let client_pub: [u8; 32] = info.public_key?.try_into().ok()?;
         
         let shared = StaticSecret::from(server_priv).diffie_hellman(&X25519PublicKey::from(client_pub));
         
@@ -175,11 +175,13 @@ impl RealityServerRustls {
  
         let handshake_msg = if full_hello[0] == 0x16 { &full_hello[5..] } else { full_hello };
         let mut aad = handshake_msg.to_vec();
-        if let Some(pos) = hex::encode(&aad).find(&hex::encode(&info.session_id)).map(|p| p/2) {
+        
+        // Optimize: search for session_id slice directly instead of hex-encoding
+        if let Some(pos) = aad.windows(info.session_id.len()).position(|window| window == info.session_id) {
             for i in 0..32 { if pos + i < aad.len() { aad[pos + i] = 0; } }
         }
  
-        let mut buf = info.session_id.clone();
+        let mut buf = info.session_id.to_vec();
         if cipher.decrypt_in_place(nonce, &aad, &mut buf).is_err() { return None; }
         if buf.len() < 16 { return None; }
  
@@ -265,7 +267,7 @@ impl RealityServerRustls {
         Ok((result_cert, result_key))
     }
  
-    async fn fallback<S>(&self, mut stream: S, prefix: &[u8], dest: &str) -> Result<()> 
+    async fn fallback<S>(&self, stream: S, prefix: &[u8], dest: &str) -> Result<()> 
     where S: AsyncRead + AsyncWrite + Unpin + Send + 'static {
         // Fallback connection with timeout
         let mut dest_stream = match tokio::time::timeout(std::time::Duration::from_secs(10), TcpStream::connect(dest)).await {

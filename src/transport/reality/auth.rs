@@ -65,23 +65,19 @@ impl RealityAuth {
 
         modified_random
     }
-    
-    /// 验证客户端的 Reality 认证
-    /// 
-    /// 客户端会在 ClientHello 的 SessionID 中携带认证信息
-    /// 认证格式：HMAC-SHA256(publicKey, clientRandom)的前 8 字节
+
     pub fn verify_client_auth(&self, client_random: &[u8; 32], session_id: &[u8]) -> bool {
-        if session_id.is_empty() {
+        if session_id.len() < 8 {
             return false;
         }
-        
+
         // 计算期望的认证标记
         let key = hmac::Key::new(hmac::HMAC_SHA256, &self.private_key_bytes);
         let signature = hmac::sign(&key, client_random);
-        
-        // 比较前 8 字节（或 session_id 的长度，取较小值）
-        let compare_len = session_id.len().min(8);
-        signature.as_ref()[..compare_len] == session_id[..compare_len]
+
+        // 使用常数时间比较前 8 字节
+        use subtle::ConstantTimeEq;
+        signature.as_ref()[..8].ct_eq(&session_id[..8]).into()
     }
 }
 
