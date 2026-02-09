@@ -157,20 +157,41 @@ impl H2Handler {
         }
         // -------------------------------------------
         
-        while let Some(result) = connection.accept().await {
-            match result {
-                Ok((request, respond)) => {
-                    let config = self.config.clone();
-                    let handler = handler.clone();
-                    let counter = self.traffic_counter.clone();
-                    tokio::spawn(async move {
-                        if let Err(e) = Self::handle_request(config, request, respond, handler, counter).await {
-                            debug!("连接处理闭合: {}", e);
+        let active_streams = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        loop {
+            let is_idle = active_streams.load(Ordering::Relaxed) == 0;
+            
+            tokio::select! {
+                result = connection.accept() => {
+                    match result {
+                        Some(Ok((request, respond))) => {
+                            let config = self.config.clone();
+                            let handler = handler.clone();
+                            let counter = self.traffic_counter.clone();
+                            let active_streams_inner = active_streams.clone();
+                            
+                            active_streams_inner.fetch_add(1, Ordering::Relaxed);
+                            tokio::spawn(async move {
+                                if let Err(e) = Self::handle_request(config, request, respond, handler, counter).await {
+                                    debug!("连接处理闭合: {}", e);
+                                }
+                                active_streams_inner.fetch_sub(1, Ordering::Relaxed);
+                            });
                         }
-                    });
+                        Some(Err(e)) => {
+                            debug!("H2 连接中断: {}", e);
+                            break;
+                        }
+                        None => break,
+                    }
                 }
-                Err(e) => {
-                    debug!("H2 连接中断: {}", e);
+                // --- 🌟 H2 Zombie Watchdog (V92) ---
+                // 如果当前没有任何活跃流 (Active Streams == 0)
+                // 且持续 300 秒没有新请求进入，则认为此连接为僵尸连接，强制关闭。
+                // 这能有效防止 H2 Ping-Pong 机制产生的应用层长连接堆积。
+                _ = tokio::time::sleep(Duration::from_secs(300)), if is_idle => {
+                    debug!("H2 Connection: Zombie watchdog triggered (300s idle)");
                     break;
                 }
             }
