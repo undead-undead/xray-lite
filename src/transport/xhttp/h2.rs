@@ -43,21 +43,26 @@ impl H2Handler {
 
     /// 自适应随机 Padding (V90: 流量敏感型)
     /// 初始阶段（探测/握手）使用长填充保证安全；传输大量数据后缩短填充以提速。
+    /// 自适应随机 Padding (V90: 流量敏感型) - 优化版：通过映射字节减少内存分配
     fn gen_adaptive_padding(traffic: u64) -> String {
         let mut rng = rand::thread_rng();
         
-        // 阈值：1MB (1048576 字节)
         let (min, max) = if traffic < 1048576 {
             (64, 512)   // 安全优先
         } else {
-            (16, 32)    // 性能优先 (节省带宽 5%+)
+            (16, 32)    // 性能优先
         };
 
         let len = rng.gen_range(min..max);
-        rng.sample_iter(&Alphanumeric)
-            .take(len)
-            .map(char::from)
-            .collect()
+        let mut bytes = vec![0u8; len];
+        rng.fill(&mut bytes[..]);
+        
+        for b in &mut bytes {
+            *b = (*b % 62) + 48; // 映射到 0-9, A-Z, a-z
+            if *b > 57 { *b += 7; }
+            if *b > 90 { *b += 6; }
+        }
+        unsafe { String::from_utf8_unchecked(bytes) }
     }
 
     /// 智能分片发送（流量整形/Shredder）
@@ -66,8 +71,9 @@ impl H2Handler {
         let mut rng = rand::thread_rng();
         
         while src.has_remaining() {
-            // 均衡优化：随机切片大小 1024B - 4096B
-            let chunk_size = rng.gen_range(1024..4096);
+            // 均衡优化：平衡拟态与性能 (8KB - 16KB)
+            // 较大的分片可以显著减少 Reality/TLS 记录层开销和系统调用次数
+            let chunk_size = rng.gen_range(8192..16384);
             let split_len = std::cmp::min(src.len(), chunk_size);
             
             // 累加流量计数
@@ -226,7 +232,7 @@ impl H2Handler {
             .unwrap();
 
         let mut send_stream = respond.send_response(response, false)?;
-        let (client_io, server_io) = tokio::io::duplex(65536);
+        let (client_io, server_io) = tokio::io::duplex(524288); // 512KB Buffer
         
         let use_grpc_framing = Arc::new(AtomicBool::new(is_grpc));
         let use_grpc_framing_up = use_grpc_framing.clone();

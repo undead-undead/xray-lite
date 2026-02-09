@@ -40,7 +40,7 @@ where
             let mut total_bytes = 0;
             let res = async {
                 loop {
-                    // 读取数据，带超时保护
+                    // 优化：大数据负载下 read_buf 会尽量填满，减少系统调用
                     let n = match timeout(idle_timeout, client_read.read_buf(&mut buf)).await {
                         Ok(Ok(n)) => n,
                         Ok(Err(e)) => return Err(e),
@@ -53,7 +53,7 @@ where
                     if n == 0 { break; }
                     remote_write.write_all(&buf[..n]).await?;
                     total_bytes += n as u64;
-                    buf.clear(); // 准备下一次读取
+                    buf.clear();
                 }
                 remote_write.shutdown().await?;
                 Ok::<u64, std::io::Error>(total_bytes)
@@ -67,7 +67,7 @@ where
             let mut total_bytes = 0;
             let res = async {
                 loop {
-                    // 读取数据，带超时保护
+                    // 优化：大数据负载下 read_buf 会尽量填满
                     let n = match timeout(idle_timeout, remote_read.read_buf(&mut buf)).await {
                         Ok(Ok(n)) => n,
                         Ok(Err(e)) => return Err(e),
