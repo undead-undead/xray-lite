@@ -45,3 +45,6 @@ gh
 vless-server-linux-*
 keygen-linux-*
 xray-linux-amd64-xdp
+xray-linux-amd64
+xray-linux-amd64.dgst
+xray-linux-amd64-uring
