@@ -4,7 +4,7 @@ use tokio::io::{ReadBuf, AsyncRead, AsyncWrite};
 use bytes::Buf;
 use anyhow::Result;
 use tokio::net::{TcpListener, TcpStream};
-use tracing::{error, info, warn};
+use tracing::{error, info, warn, debug};
 use uuid::Uuid;
 
 use crate::config::{Config, Inbound, Security};
@@ -79,6 +79,27 @@ impl Server {
             // 设置 SO_REUSEADDR
             socket.set_reuse_address(true)?;
             
+            // =================================================================================
+            // 核心修复: 启用 TCP KeepAlive 以清理半开连接 (Zombie Connections)
+            // =================================================================================
+            // 默认系统检测需 2小时+，这对高并发代理太久了。
+            // 设置为:
+            // - 闲置 60秒 后开始探测
+            // - 每隔 10秒 探测一次
+            // - 失败 3次 后断开
+            // 总共约 90秒 即可检测并断开死连接。
+            let keepalive = socket2::TcpKeepalive::new()
+                .with_time(std::time::Duration::from_secs(60))
+                .with_interval(std::time::Duration::from_secs(10))
+                .with_retries(3);
+            
+            if let Err(e) = socket.set_tcp_keepalive(&keepalive) {
+                warn!("⚠️ 无法设置 TCP KeepAlive: {}", e);
+            } else {
+                debug!("✅ TCP KeepAlive 已启用 (Idle:60s, Intvl:10s, Cnt:3)");
+            }
+            // =================================================================================
+
             // 启用 TCP Fast Open (队列长度为 256)
             #[cfg(target_os = "linux")]
             {

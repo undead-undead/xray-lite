@@ -1,7 +1,7 @@
 use anyhow::Result;
 use tokio::net::{TcpStream, TcpListener};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use vless_reality_xhttp::transport::reality::server_rustls::RealityServerRustls;
+use xray_lite::transport::reality::server_rustls::RealityServerRustls;
 use std::time::Duration;
 
 #[tokio::test]
@@ -23,7 +23,8 @@ async fn test_reality_fallback() -> Result<()> {
     let server = RealityServerRustls::new(
         private_key, 
         Some(dest_addr.to_string()),
-        vec!["0123456789abcdef".to_string()]
+        vec!["0123456789abcdef".to_string()],
+        vec!["www.microsoft.com".to_string()]
     )?;
     
     // Pick a random port

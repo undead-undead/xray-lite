@@ -331,12 +331,27 @@ impl H2Handler {
             Ok::<(), anyhow::Error>(())
         };
 
-        // 修复：不能使用 select!，因为上行流结束不代表下行流也该结束
-        // 重新使用 spawn 模式，让两个流独立运行至自然闭合
-        tokio::spawn(up_task);
-        if let Err(e) = down_task.await {
-            debug!("XHTTP 传输级异常: {}", e);
+        // Standalone 模式下，上行和下行在同一个 H2 Stream 中
+        // 必须联动：一端彻底结束或出错，另一端也该停止，释放 H2 流
+        debug!("XHTTP Standalone: 启动联动传输任务");
+        
+        let up_handle = tokio::spawn(up_task);
+        
+        tokio::select! {
+            res = up_handle => {
+                if let Err(e) = res {
+                    error!("XHTTP Standalone UP task panicked: {}", e);
+                }
+                debug!("XHTTP Standalone: UP task finished, terminating down_task");
+            }
+            res = down_task => {
+                if let Err(e) = res {
+                    debug!("XHTTP Standalone DOWN task finished with error: {}", e);
+                }
+                debug!("XHTTP Standalone: DOWN task finished, terminating up_task");
+            }
         }
+        
         Ok(())
     }
 
@@ -375,7 +390,17 @@ impl H2Handler {
                 if buf.capacity() < 2048 {
                     buf.reserve(65536);
                 }
-                let n = client_read.read_buf(&mut buf).await?;
+                // 加入 300秒 闲置超时 (Idle Timeout)
+                // 如果 5分钟 没有任何数据交换，主动断开回收资源
+                let n = match tokio::time::timeout(Duration::from_secs(300), client_read.read_buf(&mut buf)).await {
+                    Ok(Ok(n)) => n,
+                    Ok(Err(e)) => return Err(e.into()),
+                    Err(_) => {
+                        debug!("XHTTP Split DOWN: Idle timeout (300s)");
+                        break;
+                    }
+                };
+                
                 if n == 0 { break; }
                 
                 // 整形发送
@@ -387,18 +412,33 @@ impl H2Handler {
 
         let upstream = async move {
             use tokio::io::AsyncWriteExt;
-            while let Some(data) = to_vless_rx.recv().await {
-                client_write.write_all(&data).await?;
+            // 上行同样加入闲置超时，防止 POST 端长时间挂死
+            loop {
+                match tokio::time::timeout(Duration::from_secs(300), to_vless_rx.recv()).await {
+                    Ok(Some(data)) => {
+                        client_write.write_all(&data).await?;
+                    }
+                    Ok(None) => break,
+                    Err(_) => {
+                        debug!("XHTTP Split UP: Idle timeout (300s)");
+                        break;
+                    }
+                }
             }
             Ok::<(), anyhow::Error>(())
         };
 
-        // 修复：独立运行
-        tokio::spawn(upstream);
+        // 运行任务
+        let up_handle = tokio::spawn(upstream);
         let _ = downstream.await;
         
+        // 无论如何，确保从管理器移除 Session
         SESSIONS.remove(&path);
         notify.notify_waiters();
+        
+        // 等待上行任务结束
+        let _ = up_handle.await;
+
         Ok(())
     }
 

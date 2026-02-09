@@ -133,25 +133,29 @@ impl RealityServerRustls {
                 let acceptor = TlsAcceptor::from(Arc::new(config));
                 let prefixed = PrefixedStream::new(buffer, stream);
                 
-                match acceptor.accept(prefixed).await {
-                    Ok(tls) => {
+                match tokio::time::timeout(std::time::Duration::from_secs(5), acceptor.accept(prefixed)).await {
+                    Ok(Ok(tls)) => {
                         info!("Reality handshake successful");
                         return Ok(tls);
                     }
-                    Err(e) => {
+                    Ok(Err(e)) => {
                         error!("Reality TLS handshake failed: {}", e);
                         bail!("Handshake failure");
+                    }
+                    Err(_) => {
+                        error!("Reality TLS handshake timeout (5s)");
+                        bail!("Handshake timeout");
                     }
                 }
             }
         }
-
+ 
         let dest = self.reality_config.dest.as_deref().unwrap_or("www.microsoft.com:443");
         debug!("Non-Reality client or SNI mismatch, falling back to {}", dest);
         self.fallback(stream, &buffer, dest).await?;
         bail!("Fallback total");
     }
-
+ 
     fn verify_client_reality(&self, info: &ClientHelloInfo, full_hello: &[u8]) -> Option<(usize, [u8; 32])> {
         if info.session_id.len() != 32 || info.public_key.is_none() { return None; }
         
@@ -165,33 +169,33 @@ impl RealityServerRustls {
         let hk = Hkdf::<Sha256>::new(Some(&info.client_random[0..20]), shared.as_bytes());
         let mut auth_key = [0u8; 32];
         if hk.expand(b"REALITY", &mut auth_key).is_err() { return None; }
-
+ 
         let cipher = Aes256Gcm::new(aes_gcm::Key::<Aes256Gcm>::from_slice(&auth_key));
         let nonce = Nonce::from_slice(&info.client_random[20..32]);
-
+ 
         let handshake_msg = if full_hello[0] == 0x16 { &full_hello[5..] } else { full_hello };
         let mut aad = handshake_msg.to_vec();
         if let Some(pos) = hex::encode(&aad).find(&hex::encode(&info.session_id)).map(|p| p/2) {
             for i in 0..32 { if pos + i < aad.len() { aad[pos + i] = 0; } }
         }
-
+ 
         let mut buf = info.session_id.clone();
         if cipher.decrypt_in_place(nonce, &aad, &mut buf).is_err() { return None; }
         if buf.len() < 16 { return None; }
-
+ 
         for sid in &self.reality_config.short_ids {
             if sid == &buf[4..12] { return Some((4, auth_key)); }
             if sid == &buf[8..16] { return Some((8, auth_key)); }
         }
         None
     }
-
+ 
     fn generate_reality_cert(&self, auth_key: &[u8; 32], host: &str) -> Result<(CertificateDer<'static>, PrivateKeyDer<'static>)> {
         let key = CertKey {
             auth_key_sample: auth_key[0..8].try_into().unwrap(),
             host: host.to_string(),
         };
-
+ 
         // 尝试从缓存获取
         {
             match CERT_CACHE.lock() {
@@ -213,9 +217,9 @@ impl RealityServerRustls {
                 }
             }
         }
-
+ 
         use rcgen::{CertificateParams, KeyPair, PKCS_ED25519};
-
+ 
         let key_pair = KeyPair::generate(&PKCS_ED25519).map_err(|e| anyhow!("Key generation fail: {}", e))?;
         let pub_key_raw = key_pair.public_key_raw().to_vec();
         let mut params = CertificateParams::new(vec![host.to_string()]);
@@ -235,7 +239,7 @@ impl RealityServerRustls {
         let ring_key = hmac::Key::new(hmac::HMAC_SHA512, auth_key);
         let signature = hmac::sign(&ring_key, &pub_key_raw);
         let sig_bytes = signature.as_ref(); 
-
+ 
         // Overwrite the signature at the end of DER
         cert_der[sig_pos..].copy_from_slice(sig_bytes);
         
@@ -254,16 +258,21 @@ impl RealityServerRustls {
                 }
             }
         }
-
-
+ 
+ 
         let result_cert = CertificateDer::from(cert_der);
         let result_key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(priv_key_der));
         Ok((result_cert, result_key))
     }
-
+ 
     async fn fallback<S>(&self, mut stream: S, prefix: &[u8], dest: &str) -> Result<()> 
     where S: AsyncRead + AsyncWrite + Unpin + Send + 'static {
-        let mut dest_stream = TcpStream::connect(dest).await?;
+        // Fallback connection with timeout
+        let mut dest_stream = match tokio::time::timeout(std::time::Duration::from_secs(10), TcpStream::connect(dest)).await {
+            Ok(Ok(s)) => s,
+            Ok(Err(e)) => bail!("Fallback connect failed: {}", e),
+            Err(_) => bail!("Fallback connect timeout"),
+        };
         dest_stream.write_all(prefix).await?;
         tokio::io::copy_bidirectional(&mut stream, &mut dest_stream).await?;
         Ok(())

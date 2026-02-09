@@ -122,12 +122,16 @@ pub async fn serve_vless(
 
             info!("🔗 连接目标: {}", target_address);
             
-            // 连接远程服务器
-            let mut remote_stream = match tokio::net::TcpStream::connect(&target_address).await {
-                Ok(s) => s,
-                Err(e) => {
+            // 连接远程服务器 (10s 超时防止僵尸连接)
+            let mut remote_stream = match timeout(Duration::from_secs(10), tokio::net::TcpStream::connect(&target_address)).await {
+                Ok(Ok(s)) => s,
+                Ok(Err(e)) => {
                     error!("无法连接到目标 {}: {}", target_address, e);
                     return Err(e.into());
+                }
+                Err(_) => {
+                    error!("连接目标 {} 超时 (10s)", target_address);
+                    return Err(anyhow::anyhow!("Connection timeout"));
                 }
             };
             
