@@ -7,7 +7,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{mpsc, Notify};
 use tracing::{debug, info, warn, error, trace};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 use once_cell::sync::Lazy;
 use rand::{distributions::Alphanumeric, Rng};
@@ -29,17 +29,31 @@ static SESSIONS: Lazy<Arc<DashMap<String, Session>>> = Lazy::new(|| {
 #[derive(Clone)]
 pub struct H2Handler {
     config: XhttpConfig,
+    /// 流量计数器 (用于自适应优化)
+    traffic_counter: Arc<AtomicU64>,
 }
 
 impl H2Handler {
     pub fn new(config: XhttpConfig) -> Self {
-        Self { config }
+        Self { 
+            config,
+            traffic_counter: Arc::new(AtomicU64::new(0)),
+        }
     }
 
-    /// 生成随机 Padding 字符串，用于模糊 HTTP 头部长度
-    fn gen_padding() -> String {
+    /// 自适应随机 Padding (V90: 流量敏感型)
+    /// 初始阶段（探测/握手）使用长填充保证安全；传输大量数据后缩短填充以提速。
+    fn gen_adaptive_padding(traffic: u64) -> String {
         let mut rng = rand::thread_rng();
-        let len = rng.gen_range(64..512); // 随机 64 到 512 字节
+        
+        // 阈值：1MB (1048576 字节)
+        let (min, max) = if traffic < 1048576 {
+            (64, 512)   // 安全优先
+        } else {
+            (16, 32)    // 性能优先 (节省带宽 5%+)
+        };
+
+        let len = rng.gen_range(min..max);
         rng.sample_iter(&Alphanumeric)
             .take(len)
             .map(char::from)
@@ -48,16 +62,17 @@ impl H2Handler {
 
     /// 智能分片发送（流量整形/Shredder）
     /// 将大数据块切分成随机大小的小块发送，消除长度特征
-    fn send_split_data(src: &mut BytesMut, send_stream: &mut SendStream<Bytes>) -> Result<()> {
+    fn send_split_data(src: &mut BytesMut, send_stream: &mut SendStream<Bytes>, counter: &Arc<AtomicU64>) -> Result<()> {
         let mut rng = rand::thread_rng();
         
         while src.has_remaining() {
             // 均衡优化：随机切片大小 1024B - 4096B
-            // 在保持轻量级内存占用的同时，确保推特头像和视频的高速吞吐
             let chunk_size = rng.gen_range(1024..4096);
             let split_len = std::cmp::min(src.len(), chunk_size);
             
-            // split_to 会消耗 src 前面的字节，返回新的 Bytes (Zero-copy)
+            // 累加流量计数
+            counter.fetch_add(split_len as u64, Ordering::Relaxed);
+
             let chunk = src.split_to(split_len).freeze();
             send_stream.send_data(chunk, false)?;
         }
@@ -122,8 +137,9 @@ impl H2Handler {
                 Ok((request, respond)) => {
                     let config = self.config.clone();
                     let handler = handler.clone();
+                    let counter = self.traffic_counter.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = Self::handle_request(config, request, respond, handler).await {
+                        if let Err(e) = Self::handle_request(config, request, respond, handler, counter).await {
                             debug!("连接处理闭合: {}", e);
                         }
                     });
@@ -142,6 +158,7 @@ impl H2Handler {
         request: Request<h2::RecvStream>,
         mut respond: SendResponse<Bytes>,
         handler: F,
+        traffic_counter: Arc<AtomicU64>,
     ) -> Result<()>
     where
         F: Fn(Box<dyn crate::server::AsyncStream>) -> Fut + Clone + Send + 'static,
@@ -156,7 +173,7 @@ impl H2Handler {
         }
 
         if method == "GET" {
-            Self::handle_xhttp_get(path, respond, handler).await?;
+            Self::handle_xhttp_get(path, respond, handler, traffic_counter).await?;
         } else if method == "POST" {
             let user_agent = request.headers().get("user-agent").and_then(|v| v.to_str().ok()).unwrap_or("");
             let is_pc = user_agent.contains("Go-http-client");
@@ -175,12 +192,12 @@ impl H2Handler {
             let session_tx = SESSIONS.get(&path).map(|s| s.to_vless_tx.clone());
 
             if let Some(tx) = session_tx {
-                Self::handle_xhttp_post(request, respond, tx).await?;
+                Self::handle_xhttp_post(request, respond, tx, traffic_counter).await?;
             } else {
                 let content_type = request.headers().get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("");
                 // 修复：PC 端也可能使用 standard gRPC 模式 (如 Xray-core 配置为 grpc)，不能强制 !is_pc
                 let is_grpc = content_type.contains("grpc");
-                Self::handle_standalone(request, respond, handler, is_grpc).await?;
+                Self::handle_standalone(request, respond, handler, is_grpc, traffic_counter).await?;
             }
         } else {
             Self::send_error_response(&mut respond, StatusCode::METHOD_NOT_ALLOWED).await?;
@@ -193,6 +210,7 @@ impl H2Handler {
         mut respond: SendResponse<Bytes>,
         handler: F,
         is_grpc: bool,
+        traffic_counter: Arc<AtomicU64>,
     ) -> Result<()>
     where
         F: Fn(Box<dyn crate::server::AsyncStream>) -> Fut + Clone + Send + 'static,
@@ -203,7 +221,7 @@ impl H2Handler {
             .header("content-type", "application/octet-stream")
             .header("server", "nginx/1.26.0")
             .header("cache-control", "no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0")
-            .header("x-padding", Self::gen_padding()) // 注入动态填充
+            .header("x-padding", Self::gen_adaptive_padding(traffic_counter.load(Ordering::Relaxed))) // 注入动态填充
             .body(())
             .unwrap();
 
@@ -313,10 +331,10 @@ impl H2Handler {
                     buf.advance(n);
 
                     // 整形发送 gRPC 帧
-                    Self::send_split_data(&mut frame, &mut send_stream)?;
+                    Self::send_split_data(&mut frame, &mut send_stream, &traffic_counter)?;
                 } else {
                     // 整形发送普通数据流
-                    Self::send_split_data(&mut buf, &mut send_stream)?;
+                    Self::send_split_data(&mut buf, &mut send_stream, &traffic_counter)?;
                 }
             }
             
@@ -359,6 +377,7 @@ impl H2Handler {
         path: String,
         mut respond: SendResponse<Bytes>,
         handler: F,
+        traffic_counter: Arc<AtomicU64>,
     ) -> Result<()>
     where
         F: Fn(Box<dyn crate::server::AsyncStream>) -> Fut + Clone + Send + 'static,
@@ -378,7 +397,7 @@ impl H2Handler {
             .header("content-type", "application/octet-stream")
             .header("server", "nginx/1.26.0")
             .header("cache-control", "no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0")
-            .header("x-padding", Self::gen_padding()) // 注入动态填充
+            .header("x-padding", Self::gen_adaptive_padding(traffic_counter.load(Ordering::Relaxed))) // 注入动态填充
             .body(())
             .unwrap();
         let mut send_stream = respond.send_response(response, false)?;
@@ -404,7 +423,7 @@ impl H2Handler {
                 if n == 0 { break; }
                 
                 // 整形发送
-                Self::send_split_data(&mut buf, &mut send_stream)?;
+                Self::send_split_data(&mut buf, &mut send_stream, &traffic_counter)?;
             }
             send_stream.send_data(Bytes::new(), true)?;
             Ok::<(), anyhow::Error>(())
@@ -446,18 +465,21 @@ impl H2Handler {
         request: Request<h2::RecvStream>,
         mut respond: SendResponse<Bytes>,
         tx: mpsc::UnboundedSender<Bytes>,
+        traffic_counter: Arc<AtomicU64>,
     ) -> Result<()> {
         let mut body = request.into_body();
         while let Some(chunk_res) = body.data().await {
             let chunk = chunk_res?;
-            let _ = body.flow_control().release_capacity(chunk.len());
+            let len = chunk.len();
+            let _ = body.flow_control().release_capacity(len);
+            traffic_counter.fetch_add(len as u64, Ordering::Relaxed);
             let _ = tx.send(chunk);
         }
         let response = Response::builder()
             .status(StatusCode::OK)
             .header("server", "nginx/1.26.0")
             .header("cache-control", "no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0")
-            .header("x-padding", Self::gen_padding()) // 注入动态填充
+            .header("x-padding", Self::gen_adaptive_padding(traffic_counter.load(Ordering::Relaxed))) // 注入自适应填充
             .body(())
             .unwrap();
         respond.send_response(response, true)?;
