@@ -268,9 +268,12 @@ impl Server {
             use tokio::io::AsyncReadExt;
             let mut pp_buf = [0u8; 512];
             
-            // Peek 数据来检查是否有 Proxy Protocol 头
-            match stream.peek(&mut pp_buf).await {
-                Ok(n) if n > 0 => {
+            // Peek 数据来检查是否有 Proxy Protocol 头 (添加 5s 超时保护)
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                stream.peek(&mut pp_buf)
+            ).await {
+                Ok(Ok(n)) if n > 0 => {
                     if crate::protocol::is_proxy_protocol(&pp_buf[..n]) {
                         // 读取实际数据
                         let mut read_buf = vec![0u8; n];
@@ -299,7 +302,10 @@ impl Server {
                         (Box::new(stream), None)
                     }
                 }
-                _ => (Box::new(stream), None),
+                Ok(Ok(_)) | Ok(Err(_)) | Err(_) => {
+                    // 超时或读取失败，作为普通连接尝试继续
+                    (Box::new(stream), None)
+                }
             }
         } else {
             (Box::new(stream), None)

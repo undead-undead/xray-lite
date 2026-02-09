@@ -22,13 +22,69 @@ where
         }
     }
 
-    /// 双向数据转发
-    pub async fn relay(mut self) -> Result<()> {
-        debug!("开始双向数据转发 (copy_bidirectional)");
+    /// 双向数据转发 (带 300s 空闲超时控制)
+    pub async fn relay(self) -> Result<()> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::time::{timeout, Duration};
 
-        match tokio::io::copy_bidirectional(&mut self.client_stream, &mut self.remote_stream).await {
+        debug!("开始双向数据转发 (Custom Relay with 300s idle timeout)");
+
+        let (mut client_read, mut client_write) = tokio::io::split(self.client_stream);
+        let (mut remote_read, mut remote_write) = tokio::io::split(self.remote_stream);
+
+        // 闲置超时时间 (5分钟)
+        let idle_timeout = Duration::from_secs(300);
+
+        let client_to_remote = async {
+            let mut buf = vec![0u8; 16384];
+            let mut total_bytes = 0;
+            loop {
+                // 读取数据，带超时保护
+                let n = match timeout(idle_timeout, client_read.read(&mut buf)).await {
+                    Ok(Ok(n)) => n,
+                    Ok(Err(e)) => return Err(e),
+                    Err(_) => {
+                        debug!("连接闲置超时 (Client -> Remote)");
+                        return Ok(total_bytes);
+                    }
+                };
+
+                if n == 0 { break; }
+                remote_write.write_all(&buf[..n]).await?;
+                total_bytes += n as u64;
+            }
+            remote_write.shutdown().await?;
+            Ok::<u64, std::io::Error>(total_bytes)
+        };
+
+        let remote_to_client = async {
+            let mut buf = vec![0u8; 16384];
+            let mut total_bytes = 0;
+            loop {
+                // 读取数据，带超时保护
+                let n = match timeout(idle_timeout, remote_read.read(&mut buf)).await {
+                    Ok(Ok(n)) => n,
+                    Ok(Err(e)) => return Err(e),
+                    Err(_) => {
+                        debug!("连接闲置超时 (Remote -> Client)");
+                        return Ok(total_bytes);
+                    }
+                };
+
+                if n == 0 { break; }
+                client_write.write_all(&buf[..n]).await?;
+                total_bytes += n as u64;
+            }
+            client_write.shutdown().await?;
+            Ok::<u64, std::io::Error>(total_bytes)
+        };
+
+        // 使用 join 运行两个方向，任何一方正常结束或超时，都会触发联动检测
+        // 注意：我们不需要 select!，因为我们希望两个方向尽可能独立运行，
+        // 只有当两个方向都结束或其中一方出错/超时，整个 relay 才算结束。
+        match tokio::try_join!(client_to_remote, remote_to_client) {
             Ok((c2r, r2c)) => {
-                debug!("连接结束: 客户端->远程 {} 字节, 远程->客户端 {} 字节", c2r, r2c);
+                debug!("连接正常结束: 客户端->远程 {} 字节, 远程->客户端 {} 字节", c2r, r2c);
                 Ok(())
             }
             Err(e) => {
@@ -38,11 +94,11 @@ where
                     | std::io::ErrorKind::ConnectionAborted
                     | std::io::ErrorKind::BrokenPipe
                     | std::io::ErrorKind::UnexpectedEof => {
-                        debug!("连接断开: {}", e);
+                        debug!("连接异常断开: {}", e);
                         Ok(())
                     }
                     _ => {
-                        error!("连接错误: {:?} - {}", error_kind, e);
+                        error!("连接转发错误: {:?} - {}", error_kind, e);
                         Err(e.into())
                     }
                 }

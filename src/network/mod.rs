@@ -1,3 +1,3 @@
 pub mod connection;
 
-pub use connection::ConnectionManager;
+pub use connection::{ConnectionManager, ProxyConnection};

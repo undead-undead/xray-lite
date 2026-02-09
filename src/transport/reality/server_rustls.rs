@@ -274,7 +274,11 @@ impl RealityServerRustls {
             Err(_) => bail!("Fallback connect timeout"),
         };
         dest_stream.write_all(prefix).await?;
-        tokio::io::copy_bidirectional(&mut stream, &mut dest_stream).await?;
+        
+        // 使用 ProxyConnection 以获得闲置超时保护
+        let connection = crate::network::ProxyConnection::new(stream, dest_stream);
+        connection.relay().await?;
+        
         Ok(())
     }
 }

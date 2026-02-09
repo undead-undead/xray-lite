@@ -3,6 +3,8 @@ use tracing::{info, error, debug};
 use crate::server::AsyncStream;
 use crate::protocol::vless::{VlessCodec, Command, VlessResponse};
 use crate::network::ConnectionManager;
+use socket2::Socket;
+use std::os::unix::io::FromRawFd;
 
 /// 处理 VLESS 会话核心逻辑
 pub async fn serve_vless(
@@ -142,9 +144,32 @@ pub async fn serve_vless(
                 }
             }
 
-            // 发送初始数据
+            // =================================================================================
+            // 核心修复 Phase 2: 为 Outbound 连接启用 TCP KeepAlive
+            // =================================================================================
+            #[cfg(unix)]
+            {
+                use std::os::unix::io::AsRawFd;
+                let fd = remote_stream.as_raw_fd();
+                // Safety: 我们只是临时借用 fd 来设置 sockopt，随后立刻 forget
+                let socket = unsafe { Socket::from_raw_fd(fd) };
+                let keepalive = socket2::TcpKeepalive::new()
+                    .with_time(std::time::Duration::from_secs(60))
+                    .with_interval(std::time::Duration::from_secs(10))
+                    .with_retries(3);
+                
+                if let Err(e) = socket.set_tcp_keepalive(&keepalive) {
+                    debug!("⚠️ 无法为 Outbound 连接设置 KeepAlive: {}", e);
+                }
+                std::mem::forget(socket); // 极其重要：防止 Socket drop 时关闭底层 fd
+            }
+
+            // 发送初始数据 (添加 10s 超时保护)
             if !initial_data.is_empty() {
-                remote_stream.write_all(&initial_data).await?;
+                if let Err(e) = timeout(Duration::from_secs(10), remote_stream.write_all(&initial_data)).await {
+                    error!("向目标服务器写入初始数据超时: {}", e);
+                    return Err(anyhow::anyhow!("Initial write timeout"));
+                }
             }
 
             // 开始双向转发
