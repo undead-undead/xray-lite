@@ -25,6 +25,25 @@ static SESSIONS: Lazy<Arc<DashMap<String, Session>>> = Lazy::new(|| {
     Arc::new(DashMap::new())
 });
 
+/// 会话守卫 (RAII Guard)
+/// 确保 Session 在离开作用域时必然被移除，防止内存泄漏
+struct SessionGuard {
+    path: String,
+    notify: Arc<Notify>,
+}
+
+impl Drop for SessionGuard {
+    fn drop(&mut self) {
+        if SESSIONS.remove(&self.path).is_some() {
+            debug!("Session clean up: {}", self.path);
+        }
+        // notify.notify_waiters() might be problematic if runtime is shutting down
+        // We will leave it for now but keep an eye on it. 
+        // Ideally, notification should happen, but let's ensure it doesn't panic.
+        self.notify.notify_waiters();
+    }
+}
+
 /// 终极 H2/XHTTP 处理器 (v0.4.1: 编译修复与告警清理版)
 #[derive(Clone)]
 pub struct H2Handler {
@@ -393,8 +412,13 @@ impl H2Handler {
         let notify = Arc::new(Notify::new());
         
         SESSIONS.insert(path.clone(), Session { to_vless_tx, notify: notify.clone() });
+        
+        // 创建守卫，确保函数退出(无论成功/失败/Panic)都会清理 Session
+        let _guard = SessionGuard { path: path.clone(), notify: notify.clone() };
 
-        let (client_io, server_io) = tokio::io::duplex(65536);
+        // 扩容核心：将内部管道从 64KB 扩大到 512KB (Zero-copy buffer)
+        // 彻底消除高带宽下载时的反向压力 (Backpressure)
+        let (client_io, server_io) = tokio::io::duplex(524288);
         tokio::spawn(handler(Box::new(server_io)));
         let (mut client_read, mut client_write) = tokio::io::split(client_io);
 
@@ -457,9 +481,9 @@ impl H2Handler {
         let up_handle = tokio::spawn(upstream);
         let _ = downstream.await;
         
-        // 无论如何，确保从管理器移除 Session
-        SESSIONS.remove(&path);
-        notify.notify_waiters();
+        // _guard 会在离开作用域时自动 Drop 并清理 SESSIONS
+        // SESSIONS.remove(&path);  <-- 手动清理已不需要
+        // notify.notify_waiters(); <-- 由 _guard 负责
         
         // 等待上行任务结束
         let _ = up_handle.await;
