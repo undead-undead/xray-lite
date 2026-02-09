@@ -1,5 +1,6 @@
 use anyhow::Result;
 use bytes::BytesMut;
+use std::collections::HashSet;
 use uuid::Uuid;
 
 use super::{VlessRequest, VlessResponse};
@@ -7,14 +8,16 @@ use super::{VlessRequest, VlessResponse};
 /// VLESS 协议编解码器
 #[derive(Clone)]
 pub struct VlessCodec {
-    /// 允许的客户端 UUID 列表
-    allowed_uuids: Vec<Uuid>,
+    /// 允许的客户端 UUID 集合
+    allowed_uuids: HashSet<Uuid>,
 }
 
 impl VlessCodec {
     /// 创建新的编解码器
     pub fn new(allowed_uuids: Vec<Uuid>) -> Self {
-        Self { allowed_uuids }
+        Self {
+            allowed_uuids: allowed_uuids.into_iter().collect(),
+        }
     }
 
     /// 检查请求完整性 (返回 Ok(Option<usize>) 表示需要/足够的字节数)
@@ -39,19 +42,12 @@ impl VlessCodec {
 
     /// 添加允许的 UUID
     pub fn add_uuid(&mut self, uuid: Uuid) {
-        if !self.allowed_uuids.contains(&uuid) {
-            self.allowed_uuids.push(uuid);
-        }
+        self.allowed_uuids.insert(uuid);
     }
 
     /// 移除允许的 UUID
     pub fn remove_uuid(&mut self, uuid: &Uuid) -> bool {
-        if let Some(pos) = self.allowed_uuids.iter().position(|u| u == uuid) {
-            self.allowed_uuids.remove(pos);
-            true
-        } else {
-            false
-        }
+        self.allowed_uuids.remove(uuid)
     }
 }
 

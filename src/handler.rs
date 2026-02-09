@@ -145,6 +145,26 @@ pub async fn serve_vless(
             }
 
             // =================================================================================
+            // 核心优化: 为 Outbound 连接启用 TCP Fast Open (Linux Only)
+            // =================================================================================
+            #[cfg(target_os = "linux")]
+            {
+                use std::os::unix::io::AsRawFd;
+                let fd = remote_stream.as_raw_fd();
+                let val: libc::c_int = 1;
+                unsafe {
+                    // TCP_FASTOPEN_CONNECT (30) 允许在 connect() 时自动使用 TFO
+                    libc::setsockopt(
+                        fd,
+                        libc::IPPROTO_TCP,
+                        30, // TCP_FASTOPEN_CONNECT
+                        &val as *const _ as *const libc::c_void,
+                        std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+                    );
+                }
+            }
+
+            // =================================================================================
             // 核心修复 Phase 2: 为 Outbound 连接启用 TCP KeepAlive
             // =================================================================================
             #[cfg(unix)]

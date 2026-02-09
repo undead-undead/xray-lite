@@ -23,7 +23,6 @@ impl Address {
 
         // buf[0], buf[1] are Port
         let addr_type = buf[2];
-        let base_len = 3;
 
         match addr_type {
             // IPv4: 3 + 4 = 7
@@ -91,7 +90,7 @@ impl Address {
                     return Err(anyhow!("缓冲区太小，无法读取域名"));
                 }
                 let domain_bytes = buf.copy_to_bytes(len);
-                let domain = String::from_utf8(domain_bytes.to_vec())?;
+                let domain = String::from_utf8(domain_bytes.into())?;
                 Ok(Address::Domain(domain, port))
             }
             // IPv6

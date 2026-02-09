@@ -72,7 +72,10 @@ impl VlessRequest {
     }
 
     /// 从字节流解码请求
-    pub fn decode(buf: &mut BytesMut, allowed_uuids: &[Uuid]) -> Result<Self> {
+    pub fn decode(
+        buf: &mut BytesMut,
+        allowed_uuids: &std::collections::HashSet<Uuid>,
+    ) -> Result<Self> {
         // 检查最小长度: version(1) + uuid(16) + addon_length(1) + command(1) + port(2) + addr_type(1)
         if buf.remaining() < 22 {
             return Err(anyhow!("缓冲区太小，无法解码 VLESS 请求"));

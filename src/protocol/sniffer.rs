@@ -101,7 +101,8 @@ pub fn sniff_tls_sni(data: &[u8]) -> Option<String> {
 
                 if name_type == 0x00 {
                     // HostName
-                    return String::from_utf8(data[p2..p2 + name_len].to_vec()).ok();
+                    // 优化：避免 to_vec()
+                    return Some(String::from_utf8_lossy(&data[p2..p2 + name_len]).into_owned());
                 }
                 p2 += name_len;
             }

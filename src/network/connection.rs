@@ -36,47 +36,57 @@ where
         let idle_timeout = Duration::from_secs(300);
 
         let client_to_remote = async {
-            let mut buf = vec![0u8; 16384];
+            let mut buf = super::pool::acquire_buffer();
             let mut total_bytes = 0;
-            loop {
-                // 读取数据，带超时保护
-                let n = match timeout(idle_timeout, client_read.read(&mut buf)).await {
-                    Ok(Ok(n)) => n,
-                    Ok(Err(e)) => return Err(e),
-                    Err(_) => {
-                        debug!("连接闲置超时 (Client -> Remote)");
-                        return Ok(total_bytes);
-                    }
-                };
+            let res = async {
+                loop {
+                    // 读取数据，带超时保护
+                    let n = match timeout(idle_timeout, client_read.read_buf(&mut buf)).await {
+                        Ok(Ok(n)) => n,
+                        Ok(Err(e)) => return Err(e),
+                        Err(_) => {
+                            debug!("连接闲置超时 (Client -> Remote)");
+                            return Ok(total_bytes);
+                        }
+                    };
 
-                if n == 0 { break; }
-                remote_write.write_all(&buf[..n]).await?;
-                total_bytes += n as u64;
-            }
-            remote_write.shutdown().await?;
-            Ok::<u64, std::io::Error>(total_bytes)
+                    if n == 0 { break; }
+                    remote_write.write_all(&buf[..n]).await?;
+                    total_bytes += n as u64;
+                    buf.clear(); // 准备下一次读取
+                }
+                remote_write.shutdown().await?;
+                Ok::<u64, std::io::Error>(total_bytes)
+            }.await;
+            super::pool::release_buffer(buf);
+            res
         };
 
         let remote_to_client = async {
-            let mut buf = vec![0u8; 16384];
+            let mut buf = super::pool::acquire_buffer();
             let mut total_bytes = 0;
-            loop {
-                // 读取数据，带超时保护
-                let n = match timeout(idle_timeout, remote_read.read(&mut buf)).await {
-                    Ok(Ok(n)) => n,
-                    Ok(Err(e)) => return Err(e),
-                    Err(_) => {
-                        debug!("连接闲置超时 (Remote -> Client)");
-                        return Ok(total_bytes);
-                    }
-                };
+            let res = async {
+                loop {
+                    // 读取数据，带超时保护
+                    let n = match timeout(idle_timeout, remote_read.read_buf(&mut buf)).await {
+                        Ok(Ok(n)) => n,
+                        Ok(Err(e)) => return Err(e),
+                        Err(_) => {
+                            debug!("连接闲置超时 (Remote -> Client)");
+                            return Ok(total_bytes);
+                        }
+                    };
 
-                if n == 0 { break; }
-                client_write.write_all(&buf[..n]).await?;
-                total_bytes += n as u64;
-            }
-            client_write.shutdown().await?;
-            Ok::<u64, std::io::Error>(total_bytes)
+                    if n == 0 { break; }
+                    client_write.write_all(&buf[..n]).await?;
+                    total_bytes += n as u64;
+                    buf.clear();
+                }
+                client_write.shutdown().await?;
+                Ok::<u64, std::io::Error>(total_bytes)
+            }.await;
+            super::pool::release_buffer(buf);
+            res
         };
 
         // 使用 join 运行两个方向，任何一方正常结束或超时，都会触发联动检测
