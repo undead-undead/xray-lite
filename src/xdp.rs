@@ -74,12 +74,12 @@ pub mod loader {
             // --- Configure Dynamic Ports ---
             match bpf.map_mut("ALLOWED_PORTS") {
                 Some(map) => {
-                    // Enforce type <_, u16, u32> to match eBPF definition
-                    let ports_map_result: Result<HashMap<_, u16, u32>, _> = HashMap::try_from(map);
+                    // Enforce type <_, u16, u8> to match eBPF definition
+                    let ports_map_result: Result<HashMap<_, u16, u8>, _> = HashMap::try_from(map);
                     match ports_map_result {
                         Ok(mut ports_map) => {
                             for port in &ports {
-                                if let Err(e) = ports_map.insert(*port, 1, 0) {
+                                if let Err(e) = ports_map.insert(*port, 1u8, 0) {
                                     error!("Failed to add port {} to XDP Map: {}", port, e);
                                 } else {
                                     info!("🛡️  Port {} is now protected by XDP Kernel Firewall (DROP non-TLS)", port);

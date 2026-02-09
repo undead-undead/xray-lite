@@ -7,10 +7,10 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{mpsc, Notify};
 use tracing::{debug, info, warn, error, trace};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 use once_cell::sync::Lazy;
-use rand::{distributions::Alphanumeric, Rng};
+use rand::Rng;
 
 use super::XhttpConfig;
 use dashmap::DashMap;
@@ -19,6 +19,7 @@ use dashmap::DashMap;
 struct Session {
     to_vless_tx: mpsc::UnboundedSender<Bytes>,
     notify: Arc<Notify>,
+    transferred_bytes: Arc<AtomicUsize>,
 }
 
 static SESSIONS: Lazy<Arc<DashMap<String, Session>>> = Lazy::new(|| {
@@ -389,15 +390,15 @@ impl H2Handler {
                 let mut trailers = hyper::http::HeaderMap::new();
                 trailers.insert("grpc-status", "0".parse().unwrap());
                 send_stream.send_trailers(trailers)?;
-            } else {
-                send_stream.send_data(Bytes::new(), true)?;
             }
             Ok::<(), anyhow::Error>(())
         };
 
         // Standalone 模式下，上行和下行在同一个 H2 Stream 中
-        // 必须联动：一端彻底结束或出错，另一端也该停止，释放 H2 流
-        debug!("XHTTP Standalone: 启动联动传输任务");
+        // 设计意图：必须联动。在隧道穿透模式下，双向流动是对等的。
+        // 使用 tokio::select! 确保：只要其中一端（通常是请求体发完或出错）结束，
+        // 另一端也立即停止并释放 H2 Stream，避免产生残留的僵尸流。
+        debug!("XHTTP Standalone: 启动联动传输任务 (select! 模式)");
         
         let up_handle = tokio::spawn(up_task);
         
@@ -431,8 +432,13 @@ impl H2Handler {
     {
         let (to_vless_tx, mut to_vless_rx) = mpsc::unbounded_channel::<Bytes>();
         let notify = Arc::new(Notify::new());
+        let transferred_bytes = Arc::new(AtomicUsize::new(0));
         
-        SESSIONS.insert(path.clone(), Session { to_vless_tx, notify: notify.clone() });
+        SESSIONS.insert(path.clone(), Session { 
+            to_vless_tx, 
+            notify: notify.clone(),
+            transferred_bytes: transferred_bytes.clone(),
+        });
         
         // 创建守卫，确保函数退出(无论成功/失败/Panic)都会清理 Session
         let _guard = SessionGuard { path: path.clone(), notify: notify.clone() };
@@ -448,7 +454,7 @@ impl H2Handler {
             .header("content-type", "application/octet-stream")
             .header("server", "nginx/1.26.0")
             .header("cache-control", "no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0")
-            .header("x-padding", Self::gen_adaptive_padding(traffic_counter.load(Ordering::Relaxed))) // 注入动态填充
+            .header("x-padding", Self::gen_adaptive_padding(0)) // 初始响应使用 0 流量权重
             .body(())
             .unwrap();
         let mut send_stream = respond.send_response(response, false)?;
@@ -472,6 +478,9 @@ impl H2Handler {
                 };
                 
                 if n == 0 { break; }
+                
+                // 更新会话流量统计
+                transferred_bytes.fetch_add(n, Ordering::Relaxed);
                 
                 // 整形发送
                 Self::send_split_data(&mut buf, &mut send_stream, &traffic_counter)?;
@@ -518,12 +527,21 @@ impl H2Handler {
         tx: mpsc::UnboundedSender<Bytes>,
         traffic_counter: Arc<AtomicU64>,
     ) -> Result<()> {
+        let path = request.uri().path().to_string();
         let mut body = request.into_body();
         while let Some(chunk_res) = body.data().await {
             let chunk = chunk_res?;
             let len = chunk.len();
             let _ = body.flow_control().release_capacity(len);
+            
+            // 1. 更新全局计数器
             traffic_counter.fetch_add(len as u64, Ordering::Relaxed);
+            
+            // 2. 尝试更新会话级计数器 (用于自适应 Padding)
+            if let Some(session) = SESSIONS.get(&path) {
+                session.transferred_bytes.fetch_add(len, Ordering::Relaxed);
+            }
+
             let _ = tx.send(chunk);
         }
         let response = Response::builder()
