@@ -41,10 +41,16 @@ pub mod loader {
             }
 
             // 挂载 XDP 程序
-            let program: &mut Xdp = match bpf.program_mut("xdp_firewall").unwrap().try_into() {
-                Ok(p) => p,
-                Err(e) => {
-                    error!("无法获取 xdp_firewall 程序: {}", e);
+            let program: &mut Xdp = match bpf.program_mut("xray_firewall") {
+                Some(p) => match p.try_into() {
+                    Ok(p) => p,
+                    Err(e) => {
+                        error!("无法转换为 XDP 程序: {}", e);
+                        return;
+                    }
+                },
+                None => {
+                    error!("eBPF 固件中找不到 'xray_firewall' 程序！");
                     return;
                 }
             };
@@ -72,10 +78,16 @@ pub mod loader {
             );
 
             // --- Attach TC Egress Pacing ---
-            let tc_prog: &mut SchedClassifier = match bpf.program_mut("tc_egress_pacing").unwrap().try_into() {
-                Ok(p) => p,
-                Err(e) => {
-                    error!("无法获取 tc_egress_pacing 程序: {}", e);
+            let tc_prog: &mut SchedClassifier = match bpf.program_mut("tc_egress_pacing") {
+                Some(p) => match p.try_into() {
+                    Ok(p) => p,
+                    Err(e) => {
+                        error!("无法转换为 TC 程序: {}", e);
+                        return;
+                    }
+                },
+                None => {
+                    error!("eBPF 固件中找不到 'tc_egress_pacing' 程序！");
                     return;
                 }
             };
