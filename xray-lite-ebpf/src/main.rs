@@ -247,14 +247,14 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
                         let count = (entry.data[2] as u64) | ((entry.data[3] as u64) << 32);
 
                         if now > last_time + NANOS_PER_SEC {
-                            entry.data[0] = now as u32;
-                            entry.data[1] = (now >> 32) as u32;
-                            entry.data[2] = 1;
-                            entry.data[3] = 0;
+                            entry.data[0] = core::hint::black_box(now as u32);
+                            entry.data[1] = core::hint::black_box((now >> 32) as u32);
+                            entry.data[2] = core::hint::black_box(1u32);
+                            entry.data[3] = core::hint::black_box(0u32);
                         } else {
                             let new_count = count + 1;
-                            entry.data[2] = new_count as u32;
-                            entry.data[3] = (new_count >> 32) as u32;
+                            entry.data[2] = core::hint::black_box(new_count as u32);
+                            entry.data[3] = core::hint::black_box((new_count >> 32) as u32);
 
                             if new_count > SYN_LIMIT_PER_SEC as u64 {
                                 if new_count % 100 == 0 {
@@ -269,10 +269,10 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
                     }
                     None => {
                         let mut new_entry = RateLimitEntry { data: [0; 4] };
-                        new_entry.data[0] = now as u32;
-                        new_entry.data[1] = (now >> 32) as u32;
-                        new_entry.data[2] = 1;
-                        new_entry.data[3] = 0; // CRITICAL: This last 4 bytes MUST be written
+                        new_entry.data[0] = core::hint::black_box(now as u32);
+                        new_entry.data[1] = core::hint::black_box((now >> 32) as u32);
+                        new_entry.data[2] = core::hint::black_box(1u32);
+                        new_entry.data[3] = core::hint::black_box(0u32); // CRITICAL: This last 4 bytes MUST be written
 
                         let _ = RATE_LIMIT_MAP.insert(&src_ip, &new_entry, 0);
                     }
