@@ -40,8 +40,8 @@ pub struct FlowState {
 #[map]
 static FLOW_STATE_MAP: HashMap<u32, FlowState> = HashMap::with_max_entries(10240, 0);
 
-const TARGET_RATE_BPS: u64 = 100_000_000 / 8; // 100 Mbps (5G profile)
-const BURST_SIZE: u64 = 2 * 1024 * 1024; // 2MB Burst (Human-like)
+const TARGET_RATE_BPS: u64 = 200_000_000 / 8; // 200 Mbps (Optimized for 4K/8K)
+const BURST_SIZE: u64 = 4 * 1024 * 1024; // 4MB Burst (Smooth SABR emulation)
 
 // --- Constants ---
 const ETH_P_IP: u16 = 0x0800;

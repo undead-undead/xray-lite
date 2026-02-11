@@ -1,6 +1,6 @@
 #[cfg(feature = "xdp")]
 pub mod loader {
-    use aya::programs::XdpFlags;
+    use aya::programs::{XdpFlags, SchedClassifier, TcAttachType};
     use aya::{include_bytes_aligned, programs::Xdp, Bpf};
     use aya::maps::HashMap;
     use aya_log::EbpfLogger;
@@ -70,6 +70,29 @@ pub mod loader {
                 "🚀 XDP 防火墙已成功挂载到 {}！高性能内核级过滤生效中。",
                 iface
             );
+
+            // --- Attach TC Egress Pacing ---
+            let tc_prog: &mut SchedClassifier = match bpf.program_mut("tc_egress_pacing").unwrap().try_into() {
+                Ok(p) => p,
+                Err(e) => {
+                    error!("无法获取 tc_egress_pacing 程序: {}", e);
+                    return;
+                }
+            };
+
+            if let Err(e) = tc_prog.load() {
+                error!("TC 程序加载到内核失败: {}", e);
+                return;
+            }
+
+            // Ensure clsact qdisc exists (aya handles this gracefully)
+            let _ = aya::programs::tc::qdisc_add_clsact(&iface);
+
+            if let Err(e) = tc_prog.attach(&iface, TcAttachType::Egress) {
+                error!("TC Egress Pacing 挂载失败: {}", e);
+            } else {
+                info!("🚄 TC Egress Pacing (EDT + Jitter) 已成功挂载到 {} 接口！", iface);
+            }
 
             // --- Configure Dynamic Ports ---
             match bpf.map_mut("ALLOWED_PORTS") {
