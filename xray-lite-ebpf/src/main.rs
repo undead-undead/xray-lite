@@ -1,5 +1,6 @@
 #![no_std]
 #![no_main]
+#![feature(asm_experimental_arch)]
 
 use aya_ebpf::{
     bindings::xdp_action,
@@ -162,16 +163,19 @@ fn try_tc_egress_pacing(ctx: TcContext) -> Result<i32, ()> {
             state.last_tstamp = next_tstamp;
         }
         None => {
-            // The Final Solution: Bypass Struct Copy
+            // The Final Solution: Inline Assembly (Force stxdw)
             let mut data = [0u64; 2];
+            let now_val = now;
             unsafe {
-                let p = data.as_mut_ptr();
-                // 1. Force 8-byte writes via pointer and volatile with black_box
-                core::ptr::write_volatile(p, core::hint::black_box(now + interval_ns));
-                core::ptr::write_volatile(p.add(1), core::hint::black_box(BURST_SIZE));
+                core::arch::asm!(
+                    "*(u64 *)({0} + 0) = {1}",
+                    "*(u64 *)({0} + 8) = {2}",
+                    in(reg) data.as_mut_ptr(),
+                    in(reg) now_val + interval_ns,
+                    in(reg) BURST_SIZE,
+                );
 
-                // 2. Cast to struct pointer only for insertion
-                let value_ptr = p as *const FlowState;
+                let value_ptr = data.as_ptr() as *const FlowState;
                 let _ = FLOW_STATE_MAP.insert(&flow_id, &*value_ptr, 0);
             }
             next_tstamp = now;
@@ -278,13 +282,21 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
                     }
                     None => {
                         let mut data = [0u64; 2];
-                        unsafe {
-                            let p = data.as_mut_ptr();
-                            core::ptr::write_volatile(p, core::hint::black_box(now));
-                            // 关键：不要让编译器知道你要写的是 1
-                            core::ptr::write_volatile(p.add(1), core::hint::black_box(1u64));
+                        let now_val = now; // 捕获变量
 
-                            let value_ptr = p as *const RateLimitEntry;
+                        unsafe {
+                            // 使用内联汇编强制生成两条 8 字节存储指令 (stxdw)
+                            // 这样 LLVM 就绝对无法将其降级为 4 字节写入
+                            core::arch::asm!(
+                                "*(u64 *)({0} + 0) = {1}",
+                                "*(u64 *)({0} + 8) = {2}",
+                                in(reg) data.as_mut_ptr(),
+                                in(reg) now_val,
+                                in(reg) 1u64,
+                            );
+
+                            let value_ptr = data.as_ptr() as *const RateLimitEntry;
+                            // 使用插入，此时由于 data 是由内联汇编填充的，LLVM 很难进行追踪优化
                             let _ = RATE_LIMIT_MAP.insert(&src_ip, &*value_ptr, 0);
                         }
                     }
