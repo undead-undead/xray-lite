@@ -20,7 +20,7 @@ static ALLOWED_PORTS: HashMap<u16, u8> = HashMap::with_max_entries(64, 0);
 #[derive(Clone, Copy)]
 #[repr(C)]
 pub struct RateLimitEntry {
-    pub data: [u32; 4], // 16 bytes: [0,1]=last_time_ns, [2,3]=count
+    pub data: [u64; 2], // [0]: last_time_ns, [1]: count
 }
 
 // Track TCP SYN rates for source IPs
@@ -243,18 +243,21 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
                 match RATE_LIMIT_MAP.get_ptr_mut(&src_ip) {
                     Some(entry_ptr) => {
                         let entry = unsafe { &mut *entry_ptr };
-                        let last_time = (entry.data[0] as u64) | ((entry.data[1] as u64) << 32);
-                        let count = (entry.data[2] as u64) | ((entry.data[3] as u64) << 32);
+                        let last_time = entry.data[0];
+                        let count = entry.data[1];
 
                         if now > last_time + NANOS_PER_SEC {
-                            entry.data[0] = core::hint::black_box(now as u32);
-                            entry.data[1] = core::hint::black_box((now >> 32) as u32);
-                            entry.data[2] = core::hint::black_box(1u32);
-                            entry.data[3] = core::hint::black_box(0u32);
+                            // Use volatile writes to ensure full 64-bit stores
+                            unsafe {
+                                core::ptr::write_volatile(&mut entry.data[0], now);
+                                core::ptr::write_volatile(&mut entry.data[1], 1u64);
+                            }
                         } else {
                             let new_count = count + 1;
-                            entry.data[2] = core::hint::black_box(new_count as u32);
-                            entry.data[3] = core::hint::black_box((new_count >> 32) as u32);
+                            // Ensure the count update is also a full 64-bit store
+                            unsafe {
+                                core::ptr::write_volatile(&mut entry.data[1], new_count);
+                            }
 
                             if new_count > SYN_LIMIT_PER_SEC as u64 {
                                 if new_count % 100 == 0 {
@@ -268,13 +271,19 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
                         }
                     }
                     None => {
-                        let mut new_entry = RateLimitEntry { data: [0; 4] };
-                        new_entry.data[0] = core::hint::black_box(now as u32);
-                        new_entry.data[1] = core::hint::black_box((now >> 32) as u32);
-                        new_entry.data[2] = core::hint::black_box(1u32);
-                        new_entry.data[3] = core::hint::black_box(0u32); // CRITICAL: This last 4 bytes MUST be written
+                        // Scheme 1: Use MaybeUninit + write_volatile to guarantee full initialization
+                        let mut entry_uninit = core::mem::MaybeUninit::<RateLimitEntry>::uninit();
+                        let entry_ptr = entry_uninit.as_mut_ptr();
 
-                        let _ = RATE_LIMIT_MAP.insert(&src_ip, &new_entry, 0);
+                        unsafe {
+                            // Cast to raw u64 pointers for absolute control over store size
+                            let data_ptr = (&mut (*entry_ptr).data) as *mut [u64; 2] as *mut u64;
+                            core::ptr::write_volatile(data_ptr, now);
+                            core::ptr::write_volatile(data_ptr.add(1), 1u64);
+
+                            let new_entry = entry_uninit.assume_init();
+                            let _ = RATE_LIMIT_MAP.insert(&src_ip, &new_entry, 0);
+                        }
                     }
                 }
             }
