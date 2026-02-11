@@ -270,22 +270,20 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
                         }
                     }
                     None => {
-                        // The Ultimate Fix: Volatile Wrapper via Pointer
-                        // Method A: Still zero-fill to be 100% safe
-                        let mut new_entry: RateLimitEntry = unsafe { core::mem::zeroed() };
-                        let p = &mut new_entry as *mut RateLimitEntry;
+                        // The Final Solution: Bypass Struct Copy
+                        // 1. Allocate raw u64 array on stack to break struct semantic understanding
+                        let mut data = [0u64; 2];
 
                         unsafe {
-                            // 1. Force 8-byte writes via pointer and volatile
-                            // This ensures LLVM emits BPF_STX_DW (0x7b) instructions
-                            core::ptr::write_volatile(
-                                &mut (*p).last_time_ns,
-                                core::hint::black_box(now),
-                            );
-                            core::ptr::write_volatile(&mut (*p).count, core::hint::black_box(1u64));
+                            let p_base = data.as_mut_ptr();
 
-                            // 2. Pass dereferenced fully-initialized pointer
-                            let _ = RATE_LIMIT_MAP.insert(&src_ip, &*p, 0);
+                            // 2. Explicitly write at 8-byte width using volatile
+                            core::ptr::write_volatile(p_base, core::hint::black_box(now));
+                            core::ptr::write_volatile(p_base.add(1), core::hint::black_box(1u64));
+
+                            // 3. Cast to struct pointer only at the moment of insertion
+                            let value_ptr = p_base as *const RateLimitEntry;
+                            let _ = RATE_LIMIT_MAP.insert(&src_ip, &*value_ptr, 0);
                         }
                     }
                 }
