@@ -78,6 +78,7 @@ pub mod loader {
             );
 
             // --- Attach TC Egress Pacing ---
+            info!("正在挂载 TC Egress Pacing 程序...");
             let tc_prog: &mut SchedClassifier = match bpf.program_mut("tc_egress_pacing") {
                 Some(p) => match p.try_into() {
                     Ok(p) => p,
@@ -97,13 +98,14 @@ pub mod loader {
                 return;
             }
 
-            // Ensure clsact qdisc exists (aya handles this gracefully)
-            let _ = aya::programs::tc::qdisc_add_clsact(&iface);
+            // 强制清理并确保 clsact 存在 (使用系统 shell 命令确保最高兼容性)
+            let _ = std::process::Command::new("tc")
+                .args(&["qdisc", "add", "dev", &iface, "clsact"])
+                .output();
 
-            if let Err(e) = tc_prog.attach(&iface, TcAttachType::Egress) {
-                error!("TC Egress Pacing 挂载失败: {}", e);
-            } else {
-                info!("🚄 TC Egress Pacing (EDT + Jitter) 已成功挂载到 {} 接口！", iface);
+            match tc_prog.attach(&iface, TcAttachType::Egress) {
+                Ok(_) => info!("🚄 TC Egress Pacing (EDT + Jitter) 已成功挂载到 {} 接口！", iface),
+                Err(e) => error!("TC Egress Pacing 挂载失败: {}", e),
             }
 
             // --- Configure Dynamic Ports ---
