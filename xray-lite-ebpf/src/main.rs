@@ -22,6 +22,7 @@ static ALLOWED_PORTS: HashMap<u16, u8> = HashMap::with_max_entries(64, 0);
 pub struct RateLimitEntry {
     pub last_time_ns: u64,
     pub count: u32,
+    pub _padding: u32,
 }
 
 // Track TCP SYN rates for source IPs
@@ -264,6 +265,7 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
                         let new_entry = RateLimitEntry {
                             last_time_ns: now,
                             count: 1,
+                            _padding: 0,
                         };
                         let _ = RATE_LIMIT_MAP.insert(&src_ip, &new_entry, 0);
                     }
