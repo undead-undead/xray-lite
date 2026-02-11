@@ -38,11 +38,11 @@ bash <(curl -fsSL https://raw.githubusercontent.com/undead-undead/xray-lite/main
 bash <(curl -fsSL https://raw.githubusercontent.com/undead-undead/xray-lite/feature/dynamic-xdp/install.sh)
 ```
 
-**New XDP Features / XDP 新特性:**
-*   🛡️ **XDP Firewall**: Kernel-level protection against **UDP Floods**, **TCP SYN Floods (Rate Limiting)** & **Illegal Flags**. / 基于 eBPF 技术的内核级 UDP 洪水、TCP SYN 洪水（限流）和非法标志防御。
-*   🛑 **Anti-Probe**: Instantly drops **UDP Floods** & **Illegal TCP Packets** (e.g., Null Scan, SYN+FIN). / 在网卡驱动层直接丢弃 UDP 洪水和非法 TCP 包。（支持 TCP 限流）。
-*   👻 **Ultimate Stealth**: XDP drops malicious probing packets silently (DROP), while standard Web traffic is allowed (PASS). / XDP 静默丢弃探测包（无法抓包），正常 Web 流量无感放行。
-*   🎭 **Smart Protection**: Only protects configured VLESS ports (e.g., 443), allowing other services (SSH) to work normally. / 仅保护配置的 VLESS 端口（如 443），不影响其他服务（如 SSH）。
+**New XDP/TC Features / XDP/TC 新特性:**
+*   🛡️ **XDP Firewall**: Kernel-level protection against **UDP Floods**, **TCP SYN Floods**, and **Illegal Flags**. / 内核级 UDP 洪水、TCP SYN 洪水及非法标志位防御。
+*   � **TC-BPF EDT Pacing**: Sophisticated **EDT (Earliest Departure Time)** based traffic shaping with **Micro-Jitter** and **Bursting**. / 基于 EDT 的内核级流量整形，支持微秒级抖动与自适应突发，消除流量指纹。
+*   👻 **Ultimate Stealth**: Silent packet dropping (DROP) in kernel space, making the server indistinguishable from a standard Web server. / 在内核层静默丢弃探测包，使其与标准 Web 服务器无异。
+*   🎭 **Smart Protection**: Only protects configured VLESS ports, ensuring other services (like SSH) remain untouched. / 仅保护配置端口，不影响 SSH 等其他正常服务。
 
 The script will: / 脚本将自动：
 1. Detect Kernel & Architecture / 检测内核与架构
