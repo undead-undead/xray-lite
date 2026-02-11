@@ -133,8 +133,7 @@ pub mod loader {
                     #[derive(Clone, Copy)]
                     struct RateLimitEntry {
                         pub last_time_ns: u64,
-                        pub count: u32,
-                        pub _padding: u32,
+                        pub count: u64,
                     }
                     // Safety: Must match eBPF definition exactly.
                     unsafe impl aya::Pod for RateLimitEntry {}
