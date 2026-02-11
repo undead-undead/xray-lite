@@ -163,20 +163,27 @@ fn try_tc_egress_pacing(ctx: TcContext) -> Result<i32, ()> {
             state.last_tstamp = next_tstamp;
         }
         None => {
-            // The Final Solution: Inline Assembly (Force stxdw)
             let mut data = [0u64; 2];
-            let now_val = now;
+            let next_t_val = now + interval_ns;
+            let p = data.as_mut_ptr();
+
             unsafe {
+                // Golden Version Strategy: Magic Numbers for Verification (0xDEAD)
                 core::arch::asm!(
                     "*(u64 *)({0} + 0) = {1}",
-                    "*(u64 *)({0} + 8) = {2}",
-                    in(reg) data.as_mut_ptr(),
-                    in(reg) now_val + interval_ns,
-                    in(reg) BURST_SIZE,
+                    "*(u32 *)({0} + 8) = 0xDE",   // Magic Low
+                    "*(u32 *)({0} + 12) = 0xAD",  // Magic High (Padding)
+                    in(reg) p,
+                    in(reg) next_t_val,
                 );
 
-                let value_ptr = data.as_ptr() as *const FlowState;
-                let _ = FLOW_STATE_MAP.insert(&flow_id, &*value_ptr, 0);
+                // Direct helper call using the physical pointer
+                aya_ebpf::helpers::bpf_map_update_elem(
+                    &FLOW_STATE_MAP as *const _ as *mut _,
+                    &flow_id as *const _ as *const _,
+                    data.as_ptr() as *const _ as *const _,
+                    0,
+                );
             }
             next_tstamp = now;
         }
@@ -282,22 +289,26 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
                     }
                     None => {
                         let mut data = [0u64; 2];
-                        let now_val = now; // 捕获变量
+                        let now_val = now;
+                        let p = data.as_mut_ptr();
 
                         unsafe {
-                            // 使用内联汇编强制生成两条 8 字节存储指令 (stxdw)
-                            // 这样 LLVM 就绝对无法将其降级为 4 字节写入
+                            // Golden Version Strategy: Magic Numbers (0xDEAD)
                             core::arch::asm!(
                                 "*(u64 *)({0} + 0) = {1}",
-                                "*(u64 *)({0} + 8) = {2}",
-                                in(reg) data.as_mut_ptr(),
+                                "*(u32 *)({0} + 8) = 0xDE",   // Magic Low
+                                "*(u32 *)({0} + 12) = 0xAD",  // Magic High (Padding)
+                                in(reg) p,
                                 in(reg) now_val,
-                                in(reg) 1u64,
                             );
 
-                            let value_ptr = data.as_ptr() as *const RateLimitEntry;
-                            // 使用插入，此时由于 data 是由内联汇编填充的，LLVM 很难进行追踪优化
-                            let _ = RATE_LIMIT_MAP.insert(&src_ip, &*value_ptr, 0);
+                            // Direct helper call using the physical pointer
+                            aya_ebpf::helpers::bpf_map_update_elem(
+                                &RATE_LIMIT_MAP as *const _ as *mut _,
+                                &src_ip as *const _ as *const _,
+                                data.as_ptr() as *const _ as *const _,
+                                0,
+                            );
                         }
                     }
                 }
