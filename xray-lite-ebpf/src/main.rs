@@ -29,8 +29,8 @@ pub struct RateLimitEntry {
 static RATE_LIMIT_MAP: HashMap<u32, RateLimitEntry> = HashMap::with_max_entries(10240, 0);
 
 // --- Advanced TC Egress Pacing (EDT + Jitter + Bursting) ---
+#[repr(C, align(8))]
 #[derive(Clone, Copy)]
-#[repr(C)]
 pub struct FlowState {
     pub last_tstamp: u64,
     pub burst_allowance: u64,
@@ -162,11 +162,18 @@ fn try_tc_egress_pacing(ctx: TcContext) -> Result<i32, ()> {
             state.last_tstamp = next_tstamp;
         }
         None => {
-            let new_state = FlowState {
-                last_tstamp: now + interval_ns,
-                burst_allowance: BURST_SIZE,
-            };
-            let _ = FLOW_STATE_MAP.insert(&flow_id, &new_state, 0);
+            // The Final Solution: Bypass Struct Copy
+            let mut data = [0u64; 2];
+            unsafe {
+                let p = data.as_mut_ptr();
+                // 1. Force 8-byte writes via pointer and volatile with black_box
+                core::ptr::write_volatile(p, core::hint::black_box(now + interval_ns));
+                core::ptr::write_volatile(p.add(1), core::hint::black_box(BURST_SIZE));
+
+                // 2. Cast to struct pointer only for insertion
+                let value_ptr = p as *const FlowState;
+                let _ = FLOW_STATE_MAP.insert(&flow_id, &*value_ptr, 0);
+            }
             next_tstamp = now;
         }
     }
@@ -270,19 +277,14 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
                         }
                     }
                     None => {
-                        // The Final Solution: Bypass Struct Copy
-                        // 1. Allocate raw u64 array on stack to break struct semantic understanding
                         let mut data = [0u64; 2];
-
                         unsafe {
-                            let p_base = data.as_mut_ptr();
+                            let p = data.as_mut_ptr();
+                            core::ptr::write_volatile(p, core::hint::black_box(now));
+                            // 关键：不要让编译器知道你要写的是 1
+                            core::ptr::write_volatile(p.add(1), core::hint::black_box(1u64));
 
-                            // 2. Explicitly write at 8-byte width using volatile
-                            core::ptr::write_volatile(p_base, core::hint::black_box(now));
-                            core::ptr::write_volatile(p_base.add(1), core::hint::black_box(1u64));
-
-                            // 3. Cast to struct pointer only at the moment of insertion
-                            let value_ptr = p_base as *const RateLimitEntry;
+                            let value_ptr = p as *const RateLimitEntry;
                             let _ = RATE_LIMIT_MAP.insert(&src_ip, &*value_ptr, 0);
                         }
                     }
