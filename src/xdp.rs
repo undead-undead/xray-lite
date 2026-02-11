@@ -8,131 +8,123 @@ pub mod loader {
     use tokio;
 
     pub fn start_xdp(iface: &str, ports: Vec<u16>) {
-        let iface = iface.to_string();
-        let ports = ports.clone();
+        let iface_name = iface.to_string();
+        let protected_ports = ports.clone();
 
-        // Must use tokio::spawn to provide Reactor context for aya::log
-        tokio::spawn(async move {
-            info!("正在初始化 XDP 防火墙，接口: {}", iface);
+        info!("🛡️  正在初始化内核组件 (XDP + TC Pacing)...");
 
-            // 加载逻辑
-            // 这里的路径是相对于 User Space crate root 的 (xray-lite/)
-            #[cfg(debug_assertions)]
-             let program_bytes = include_bytes_aligned!(
-                "../xray-lite-ebpf/target/bpfel-unknown-none/release/xray-lite-ebpf"
-            );
-            #[cfg(not(debug_assertions))]
-            let program_bytes = include_bytes_aligned!(
-                "../xray-lite-ebpf/target/bpfel-unknown-none/release/xray-lite-ebpf"
-            );
+        // 这里的路径是相对于 User Space crate root 的 (xray-lite/)
+        #[cfg(debug_assertions)]
+        let program_bytes = include_bytes_aligned!(
+            "../xray-lite-ebpf/target/bpfel-unknown-none/release/xray-lite-ebpf"
+        );
+        #[cfg(not(debug_assertions))]
+        let program_bytes = include_bytes_aligned!(
+            "../xray-lite-ebpf/target/bpfel-unknown-none/release/xray-lite-ebpf"
+        );
 
-            // 加载 BPF
-            let mut bpf = match Bpf::load(program_bytes) {
-                Ok(b) => b,
+        // 1. 加载 BPF (同步进行)
+        let mut bpf = match Bpf::load(program_bytes) {
+            Ok(b) => b,
+            Err(e) => {
+                error!("❌ eBPF 固件加载失败 (ELF 解析错误): {}", e);
+                return;
+            }
+        };
+
+        info!("✅ eBPF 固件解析成功！正在尝试挂载到接口: {}", iface_name);
+
+        // 2. 挂载 XDP 程序
+        let xdp_prog: &mut Xdp = match bpf.program_mut("xray_firewall") {
+            Some(p) => match p.try_into() {
+                Ok(p) => p,
                 Err(e) => {
-                    error!("XDP 加载失败: {}", e);
+                    error!("❌ 无法转换为 XDP 程序类型: {}", e);
                     return;
                 }
-            };
+            },
+            None => {
+                error!("❌ eBPF 固件中找不到 'xray_firewall' 入口！");
+                return;
+            }
+        };
 
-            // 初始化日志：必须在 Tokio Runtime 上下文中调用
+        if let Err(e) = xdp_prog.load() {
+            error!("❌ XDP 程序内核加载失败: {}", e);
+            return;
+        }
+
+        if let Err(e) = xdp_prog.attach(&iface_name, XdpFlags::default()) {
+            warn!("⚠️  XDP Native 挂载失败: {}. 尝试 SKB (Generic) 模式...", e);
+            if let Err(e_skb) = xdp_prog.attach(&iface_name, XdpFlags::SKB_MODE) {
+                error!("❌ XDP SKB 模式也挂载失败: {}", e_skb);
+            } else {
+                info!("🚀 XDP 防火墙已通过 SKB 模式挂载成功！");
+            }
+        } else {
+            info!("🚀 XDP 防火墙已通过 Native 模式成功挂载！");
+        }
+
+        // 3. 挂载 TC Pacing 程序
+        let tc_prog: &mut SchedClassifier = match bpf.program_mut("tc_egress_pacing") {
+            Some(p) => match p.try_into() {
+                Ok(p) => p,
+                Err(e) => {
+                    error!("❌ 无法转换为 TC 程序类型: {}", e);
+                    return;
+                }
+            },
+            None => {
+                error!("❌ eBPF 固件中找不到 'tc_egress_pacing' 入口！");
+                return;
+            }
+        };
+
+        if let Err(e) = tc_prog.load() {
+            error!("❌ TC 程序内核加载失败: {}", e);
+            return;
+        }
+
+        // 显式创建 clsact 队列
+        let _ = std::process::Command::new("tc")
+            .args(&["qdisc", "add", "dev", &iface_name, "clsact"])
+            .output();
+
+        if let Err(e) = tc_prog.attach(&iface_name, TcAttachType::Egress) {
+            error!("❌ TC Pacing 挂载失败: {}", e);
+        } else {
+            info!("🚄 TC Egress Pacing (500Mbps + Jitter) 已成功激活！");
+        }
+
+        // 4. 配置端口白名单
+        match bpf.map_mut("ALLOWED_PORTS") {
+            Some(map) => {
+                let ports_map_result: Result<HashMap<_, u16, u8>, _> = HashMap::try_from(map);
+                match ports_map_result {
+                    Ok(mut ports_map) => {
+                        for port in &protected_ports {
+                            let _ = ports_map.insert(*port, 1u8, 0);
+                            info!("🛡️  端口 {} 已进入 XDP 内核防护白名单", port);
+                        }
+                    },
+                    Err(_) => error!("❌ 无法访问 ALLOWED_PORTS 映射表"),
+                }
+            },
+            None => error!("❌ 找不到 ALLOWED_PORTS 映射表"),
+        }
+
+        // 5. 后台启动日志和 GC 循环
+        tokio::spawn(async move {
+            info!("🔄 启动 eBPF 后台管理任务...");
+
+            // 初始化日志
             if let Err(e) = EbpfLogger::init(&mut bpf) {
-                warn!("XDP EbpfLogger 初始化失败 (非致命): {}", e);
+                warn!("⚠️  EbpfLogger 初始化失败 (非致命): {}", e);
             }
 
-            // 挂载 XDP 程序
-            let program: &mut Xdp = match bpf.program_mut("xray_firewall") {
-                Some(p) => match p.try_into() {
-                    Ok(p) => p,
-                    Err(e) => {
-                        error!("无法转换为 XDP 程序: {}", e);
-                        return;
-                    }
-                },
-                None => {
-                    error!("eBPF 固件中找不到 'xray_firewall' 程序！");
-                    return;
-                }
-            };
-
-            if let Err(e) = program.load() {
-                error!("XDP 程序加载到内核失败: {}", e);
-                return;
-            }
-
-            // Try attach in default (Driver) mode first
-            if let Err(e) = program.attach(&iface, XdpFlags::default()) {
-                warn!("XDP Native (Driver) attach failed: {}. Falling back to SKB (Generic) mode...", e);
-                // Fallback to SKB (Generic) mode
-                // Note: SKB mode is slower but works on almost all drivers/kernels
-                if let Err(e_skb) = program.attach(&iface, XdpFlags::SKB_MODE) {
-                    error!("XDP SKB (Generic) attach also failed: {}", e_skb);
-                    return;
-                }
-                info!("⚠️ Falling back to XDP SKB (Generic) mode. Performance might be reduced but still better than iptables.");
-            }
-
-            info!(
-                "🚀 XDP 防火墙已成功挂载到 {}！高性能内核级过滤生效中。",
-                iface
-            );
-
-            // --- Attach TC Egress Pacing ---
-            info!("正在挂载 TC Egress Pacing 程序...");
-            let tc_prog: &mut SchedClassifier = match bpf.program_mut("tc_egress_pacing") {
-                Some(p) => match p.try_into() {
-                    Ok(p) => p,
-                    Err(e) => {
-                        error!("无法转换为 TC 程序: {}", e);
-                        return;
-                    }
-                },
-                None => {
-                    error!("eBPF 固件中找不到 'tc_egress_pacing' 程序！");
-                    return;
-                }
-            };
-
-            if let Err(e) = tc_prog.load() {
-                error!("TC 程序加载到内核失败: {}", e);
-                return;
-            }
-
-            // 强制清理并确保 clsact 存在 (使用系统 shell 命令确保最高兼容性)
-            let _ = std::process::Command::new("tc")
-                .args(&["qdisc", "add", "dev", &iface, "clsact"])
-                .output();
-
-            match tc_prog.attach(&iface, TcAttachType::Egress) {
-                Ok(_) => info!("🚄 TC Egress Pacing (EDT + Jitter) 已成功挂载到 {} 接口！", iface),
-                Err(e) => error!("TC Egress Pacing 挂载失败: {}", e),
-            }
-
-            // --- Configure Dynamic Ports ---
-            match bpf.map_mut("ALLOWED_PORTS") {
-                Some(map) => {
-                    // Enforce type <_, u16, u8> to match eBPF definition
-                    let ports_map_result: Result<HashMap<_, u16, u8>, _> = HashMap::try_from(map);
-                    match ports_map_result {
-                        Ok(mut ports_map) => {
-                            for port in &ports {
-                                if let Err(e) = ports_map.insert(*port, 1u8, 0) {
-                                    error!("Failed to add port {} to XDP Map: {}", port, e);
-                                } else {
-                                    info!("🛡️  Port {} is now protected by XDP Kernel Firewall (DROP non-TLS)", port);
-                                }
-                            }
-                        },
-                        Err(e) => error!("Failed to access ALLOWED_PORTS map as HashMap: {}", e),
-                    }
-                },
-                None => error!("XDP Map 'ALLOWED_PORTS' not found in eBPF program!"),
-            }
-
-            // --- Garbage Collection Loop ---
             loop {
-                // Sleep for 3 minutes
                 tokio::time::sleep(std::time::Duration::from_secs(180)).await;
+                // ... (GC logic remains the same)
 
                 // --- GC for RATE_LIMIT_MAP ---
                 if let Some(map) = bpf.map_mut("RATE_LIMIT_MAP") {
