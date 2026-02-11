@@ -248,7 +248,6 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
                         let count = entry.count;
 
                         if now > last_time + NANOS_PER_SEC {
-                            // Update existing entry with volatile writes
                             unsafe {
                                 core::ptr::write_volatile(&mut entry.last_time_ns, now);
                                 core::ptr::write_volatile(&mut entry.count, 1u64);
@@ -271,13 +270,20 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
                         }
                     }
                     None => {
-                        // Method A: Zero Initialization (The Golden Fix)
-                        // This ensures all 16 bytes (including any gaps LLVM skips) are initialized.
+                        // The Ultimate Fix: Zeroed + Black Box Escape
+                        // 1. Force the stack to be 100% zeroed.
                         let mut new_entry: RateLimitEntry = unsafe { core::mem::zeroed() };
 
+                        // 2. ESCAPE: Hide the pointer from LLVM to prevent it from optimizing away the zeroing step.
+                        let p = core::hint::black_box(&mut new_entry);
+
+                        // 3. FORCE WRITES: Use volatile and black-boxed constants.
                         unsafe {
-                            core::ptr::write_volatile(&mut new_entry.last_time_ns, now);
-                            core::ptr::write_volatile(&mut new_entry.count, 1u64);
+                            core::ptr::write_volatile(
+                                &mut p.last_time_ns,
+                                core::hint::black_box(now),
+                            );
+                            core::ptr::write_volatile(&mut p.count, core::hint::black_box(1u64));
                         }
 
                         let _ = RATE_LIMIT_MAP.insert(&src_ip, &new_entry, 0);
