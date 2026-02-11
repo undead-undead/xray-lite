@@ -132,7 +132,7 @@ pub mod loader {
                     #[repr(C)]
                     #[derive(Clone, Copy)]
                     struct RateLimitEntry {
-                        pub data: [u64; 2],
+                        pub data: [u32; 4],
                     }
                     // Safety: Must match eBPF definition exactly.
                     unsafe impl aya::Pod for RateLimitEntry {}
@@ -153,7 +153,8 @@ pub mod loader {
 
                                         for item in limit_map.iter() {
                                             if let Ok((k, v)) = item {
-                                                if v.data[0] < threshold_ns {
+                                                let last_time_ns = (v.data[0] as u64) | ((v.data[1] as u64) << 32);
+                                                if last_time_ns < threshold_ns {
                                                     keys_to_remove.push(k);
                                                 }
                                             }

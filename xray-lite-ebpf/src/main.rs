@@ -20,7 +20,7 @@ static ALLOWED_PORTS: HashMap<u16, u8> = HashMap::with_max_entries(64, 0);
 #[derive(Clone, Copy)]
 #[repr(C)]
 pub struct RateLimitEntry {
-    pub data: [u64; 2], // [0]: last_time_ns, [1]: count
+    pub data: [u32; 4], // 16 bytes: [0,1]=last_time_ns, [2,3]=count
 }
 
 // Track TCP SYN rates for source IPs
@@ -243,16 +243,21 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
                 match RATE_LIMIT_MAP.get_ptr_mut(&src_ip) {
                     Some(entry_ptr) => {
                         let entry = unsafe { &mut *entry_ptr };
-                        let last_time = entry.data[0];
-                        let count = entry.data[1];
+                        let last_time = (entry.data[0] as u64) | ((entry.data[1] as u64) << 32);
+                        let count = (entry.data[2] as u64) | ((entry.data[3] as u64) << 32);
 
                         if now > last_time + NANOS_PER_SEC {
-                            entry.data[0] = now;
-                            entry.data[1] = 1;
+                            entry.data[0] = now as u32;
+                            entry.data[1] = (now >> 32) as u32;
+                            entry.data[2] = 1;
+                            entry.data[3] = 0;
                         } else {
-                            entry.data[1] = count + 1;
-                            if entry.data[1] > SYN_LIMIT_PER_SEC as u64 {
-                                if entry.data[1] % 100 == 0 {
+                            let new_count = count + 1;
+                            entry.data[2] = new_count as u32;
+                            entry.data[3] = (new_count >> 32) as u32;
+
+                            if new_count > SYN_LIMIT_PER_SEC as u64 {
+                                if new_count % 100 == 0 {
                                     warn!(
                                         &ctx,
                                         "⛔ RATELIMIT: Dropped SYN flood from IP {:x}", src_ip
@@ -263,16 +268,11 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
                         }
                     }
                     None => {
-                        // Use explicit initialization to avoid any padding issues
-                        let mut new_entry = RateLimitEntry { data: [0; 2] };
-
-                        // Use volatile write to force a full 64-bit store instruction (stxdw).
-                        // This prevents LLVM from optimizing the write of the constant `1` into a 32-bit store (stxw),
-                        // which would leave the upper 32 bits uninitialized from the perspective of the BPF verifier.
-                        unsafe {
-                            core::ptr::write_volatile(&mut new_entry.data[0], now);
-                            core::ptr::write_volatile(&mut new_entry.data[1], 1u64);
-                        }
+                        let mut new_entry = RateLimitEntry { data: [0; 4] };
+                        new_entry.data[0] = now as u32;
+                        new_entry.data[1] = (now >> 32) as u32;
+                        new_entry.data[2] = 1;
+                        new_entry.data[3] = 0; // CRITICAL: This last 4 bytes MUST be written
 
                         let _ = RATE_LIMIT_MAP.insert(&src_ip, &new_entry, 0);
                     }
