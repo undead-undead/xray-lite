@@ -265,14 +265,9 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
                     None => {
                         // Use explicit initialization to avoid any padding issues
                         let mut new_entry = RateLimitEntry { data: [0; 2] };
-
-                        // Force 64-bit writes using volatile store to prevent LLVM optimization
-                        // This ensures the verifier sees full initialization of the struct
-                        unsafe {
-                            core::ptr::write_volatile(&mut new_entry.data[0], now);
-                            core::ptr::write_volatile(&mut new_entry.data[1], 1);
-                        }
-
+                        new_entry.data[0] = now;
+                        // Use black_box to force 64-bit register usage
+                        new_entry.data[1] = core::hint::black_box(1);
                         let _ = RATE_LIMIT_MAP.insert(&src_ip, &new_entry, 0);
                     }
                 }
