@@ -17,8 +17,8 @@ use core::mem;
 #[map]
 static ALLOWED_PORTS: HashMap<u16, u8> = HashMap::with_max_entries(64, 0);
 
+#[repr(C, align(8))]
 #[derive(Clone, Copy)]
-#[repr(C)]
 pub struct RateLimitEntry {
     pub last_time_ns: u64,
     pub count: u64,
@@ -270,23 +270,23 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
                         }
                     }
                     None => {
-                        // The Ultimate Fix: Zeroed + Black Box Escape
-                        // 1. Force the stack to be 100% zeroed.
+                        // The Ultimate Fix: Volatile Wrapper via Pointer
+                        // Method A: Still zero-fill to be 100% safe
                         let mut new_entry: RateLimitEntry = unsafe { core::mem::zeroed() };
+                        let p = &mut new_entry as *mut RateLimitEntry;
 
-                        // 2. ESCAPE: Hide the pointer from LLVM to prevent it from optimizing away the zeroing step.
-                        let p = core::hint::black_box(&mut new_entry);
-
-                        // 3. FORCE WRITES: Use volatile and black-boxed constants.
                         unsafe {
+                            // 1. Force 8-byte writes via pointer and volatile
+                            // This ensures LLVM emits BPF_STX_DW (0x7b) instructions
                             core::ptr::write_volatile(
-                                &mut p.last_time_ns,
+                                &mut (*p).last_time_ns,
                                 core::hint::black_box(now),
                             );
-                            core::ptr::write_volatile(&mut p.count, core::hint::black_box(1u64));
-                        }
+                            core::ptr::write_volatile(&mut (*p).count, core::hint::black_box(1u64));
 
-                        let _ = RATE_LIMIT_MAP.insert(&src_ip, &new_entry, 0);
+                            // 2. Pass dereferenced fully-initialized pointer
+                            let _ = RATE_LIMIT_MAP.insert(&src_ip, &*p, 0);
+                        }
                     }
                 }
             }
