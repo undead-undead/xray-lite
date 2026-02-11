@@ -20,8 +20,7 @@ static ALLOWED_PORTS: HashMap<u16, u8> = HashMap::with_max_entries(64, 0);
 #[derive(Clone, Copy)]
 #[repr(C)]
 pub struct RateLimitEntry {
-    pub last_time_ns: u64,
-    pub count: u64,
+    pub data: [u64; 2], // [0]: last_time_ns, [1]: count
 }
 
 // Track TCP SYN rates for source IPs
@@ -242,15 +241,18 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
                 let now = unsafe { bpf_ktime_get_ns() };
 
                 match RATE_LIMIT_MAP.get_ptr_mut(&src_ip) {
-                    Some(entry) => {
-                        let entry = unsafe { &mut *entry };
-                        if now > entry.last_time_ns + NANOS_PER_SEC {
-                            entry.last_time_ns = now;
-                            entry.count = 1;
+                    Some(entry_ptr) => {
+                        let entry = unsafe { &mut *entry_ptr };
+                        let last_time = entry.data[0];
+                        let count = entry.data[1];
+
+                        if now > last_time + NANOS_PER_SEC {
+                            entry.data[0] = now;
+                            entry.data[1] = 1;
                         } else {
-                            entry.count += 1;
-                            if entry.count > SYN_LIMIT_PER_SEC as u64 {
-                                if entry.count % 100 == 0 {
+                            entry.data[1] = count + 1;
+                            if entry.data[1] > SYN_LIMIT_PER_SEC as u64 {
+                                if entry.data[1] % 100 == 0 {
                                     warn!(
                                         &ctx,
                                         "⛔ RATELIMIT: Dropped SYN flood from IP {:x}", src_ip
@@ -261,10 +263,7 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
                         }
                     }
                     None => {
-                        let new_entry = RateLimitEntry {
-                            last_time_ns: now,
-                            count: 1,
-                        };
+                        let new_entry = RateLimitEntry { data: [now, 1] };
                         let _ = RATE_LIMIT_MAP.insert(&src_ip, &new_entry, 0);
                     }
                 }
