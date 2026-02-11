@@ -18,7 +18,6 @@ use dashmap::DashMap;
 /// 全局会话管理器
 struct Session {
     to_vless_tx: mpsc::UnboundedSender<Bytes>,
-    notify: Arc<Notify>,
     transferred_bytes: Arc<AtomicUsize>,
 }
 
@@ -115,8 +114,8 @@ impl H2Handler {
 
         let mut builder = server::Builder::new();
         builder
-            .initial_window_size(4194304)    // 4MB 窗口
-            .initial_connection_window_size(8388608) // 8MB 连接窗口
+            .initial_window_size(65535)    // 64KB 窗口 (原 4MB)
+            .initial_connection_window_size(5242880) // 5MB 连接窗口
             .max_concurrent_streams(500)
             .max_frame_size(16384);
 
@@ -436,7 +435,6 @@ impl H2Handler {
         
         SESSIONS.insert(path.clone(), Session { 
             to_vless_tx, 
-            notify: notify.clone(),
             transferred_bytes: transferred_bytes.clone(),
         });
         

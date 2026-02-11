@@ -1,5 +1,5 @@
 use anyhow::{anyhow, Result};
-use bytes::{Buf, BufMut, BytesMut};
+use bytes::{Buf, BytesMut};
 use std::net::{Ipv4Addr, Ipv6Addr};
 
 /// VLESS 地址类型
@@ -106,37 +106,8 @@ impl Address {
         }
     }
 
-    /// 将地址编码为字节流
-    /// 注意：VLESS 协议使用 PortThenAddress 格式
-    pub fn encode(&self, buf: &mut BytesMut) {
-        match self {
-            Address::Ipv4(ip, port) => {
-                buf.put_u16(*port); // 先写 Port
-                buf.put_u8(0x01); // 再写 Address Type
-                buf.put_slice(&ip.octets());
-            }
-            Address::Domain(domain, port) => {
-                buf.put_u16(*port); // 先写 Port
-                buf.put_u8(0x02); // 再写 Address Type
-                buf.put_u8(domain.len() as u8);
-                buf.put_slice(domain.as_bytes());
-            }
-            Address::Ipv6(ip, port) => {
-                buf.put_u16(*port); // 先写 Port
-                buf.put_u8(0x03); // 再写 Address Type
-                buf.put_slice(&ip.octets());
-            }
-        }
-    }
-
-    /// 获取端口
-    pub fn port(&self) -> u16 {
-        match self {
-            Address::Ipv4(_, port) | Address::Ipv6(_, port) | Address::Domain(_, port) => *port,
-        }
-    }
-
     /// 转换为字符串表示
+    #[allow(dead_code)]
     pub fn to_string(&self) -> String {
         match self {
             Address::Ipv4(ip, port) => format!("{}:{}", ip, port),

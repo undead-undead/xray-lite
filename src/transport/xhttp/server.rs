@@ -1,12 +1,11 @@
 use anyhow::{anyhow, Result};
 use tracing::{debug, info};
 
-use super::{XhttpConfig, H2Handler, XhttpMode};
+use super::{XhttpConfig, H2Handler};
 
 /// XHTTP 服务器
 #[derive(Clone)]
 pub struct XhttpServer {
-    config: XhttpConfig,
     h2_handler: H2Handler,
 }
 
@@ -29,7 +28,7 @@ impl XhttpServer {
 
         let h2_handler = H2Handler::new(config.clone());
 
-        Ok(Self { config, h2_handler })
+        Ok(Self { h2_handler })
     }
 
     /// 处理传入的连接
@@ -47,20 +46,6 @@ impl XhttpServer {
         Ok(())
     }
 
-    /// 获取工作模式
-    pub fn mode(&self) -> &XhttpMode {
-        &self.config.mode
-    }
-
-    /// 获取路径
-    pub fn path(&self) -> &str {
-        &self.config.path
-    }
-
-    /// 获取 Host
-    pub fn host(&self) -> &str {
-        &self.config.host
-    }
 }
 
 #[cfg(test)]
@@ -77,10 +62,6 @@ mod tests {
 
         let server = XhttpServer::new(config);
         assert!(server.is_ok());
-
-        let server = server.unwrap();
-        assert_eq!(server.path(), "/");
-        assert_eq!(server.host(), "www.example.com");
     }
 
     #[test]

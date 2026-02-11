@@ -97,17 +97,8 @@ pub mod loader {
                 // Sleep for 3 minutes
                 tokio::time::sleep(std::time::Duration::from_secs(180)).await;
 
-                // Perform GC
+                // --- GC for RATE_LIMIT_MAP ---
                 if let Some(map) = bpf.map_mut("RATE_LIMIT_MAP") {
-                    // Try to borrow as HashMap. 
-                    // Note: In aya, maps are not async, so this might block slightly, but it's user space.
-                    // u32 key (src_ip), RateLimitEntry value (need to define struct layout or read raw bytes)
-                    // Simplified: We assume we can access it using the PerCpuHashMap or HashMap wrapper.
-                    // However, we need the exact struct definition from ebpf crate to decode "RateLimitEntry".
-                    // Since we can't easily import "RateLimitEntry" from the ebpf crate here without a dependency cycle 
-                    // or code duplication, and given this is a quick fix, let's use the raw primitive approach if possible, 
-                    // OR (better) just clean by time if we can decode the struct similarly to how eBPF does.
-
                     // To avoid dependency complexity, we define a local POD struct matching the eBPF one.
                     #[repr(C)]
                     #[derive(Clone, Copy)]
@@ -124,26 +115,7 @@ pub mod loader {
                     match limit_map_result {
                         Ok(mut limit_map) => {
                             let mut keys_to_remove = Vec::new();
-                            // Kernel uses CLOCK_MONOTONIC (bpf_ktime_get_ns).
-                            // We need a comparable timestamp. Rust's Instant::now() often maps to CLOCK_MONOTONIC.
-                            // But to be precise, we should diff against the "last_time_ns" recorded.
-                            // Actually, bpf_ktime_get_ns() is usually boot time. 
-                            // std::time::Instant uses an opaque value, but we can check elapsed time.
-                            //
-                            // WAIT: The eBPF store `last_time_ns` from `bpf_ktime_get_ns()`.
-                            // User space cannot easily get the EXACT same clock reference without `libc::clock_gettime(CLOCK_MONOTONIC, ...)`.
-                            //
-                            // Let's use a heuristic: Any entry not updated deeply in the past is stale.
-                            // BUT: user space doesn't know "now" in eBPF terms effortlessly.
-                            // 
-                            // ALTERNATIVE: Use uptime.
-                            // `bpf_ktime_get_ns()` returns nanoseconds since boot.
-                            // In Rust, we can get uptime from `/proc/uptime` or using `libc`.
-                            //
-                            // Let's us `nix` or `libc` if available, or just read /proc/uptime for simplicity?
-                            // Or better: std::time::Instant::now() is monotonic.
-                            // But we need the ABSOLUTE value to compare.
-                            //
+                            
                             // Let's try reading /proc/uptime.
                             if let Ok(uptime_seconds) = std::fs::read_to_string("/proc/uptime") {
                                 if let Some(sec_str) = uptime_seconds.split_whitespace().next() {
@@ -151,11 +123,6 @@ pub mod loader {
                                         let now_ns = (sec_f64 * 1_000_000_000.0) as u64;
                                         let threshold_ns = now_ns.saturating_sub(180 * 1_000_000_000); // 3 mins ago
 
-                                        // Retrieve keys. HashMap iterator in Aya gives Result<(Key, Value)>.
-                                        // We have to be careful about iteration invalidation.
-                                        // We collect keys first.
-                                        
-                                        // Iterate map. Note: This can be slow if map is HUGE, but 10k entries is fine.
                                         for item in limit_map.iter() {
                                             if let Ok((k, v)) = item {
                                                 if v.last_time_ns < threshold_ns {
@@ -178,6 +145,50 @@ pub mod loader {
                     }
                 } else {
                     warn!("GC: RATE_LIMIT_MAP not found");
+                }
+
+                // --- GC for FLOW_STATE_MAP (TC Pacing) ---
+                if let Some(map) = bpf.map_mut("FLOW_STATE_MAP") {
+                    #[repr(C)]
+                    #[derive(Clone, Copy)]
+                    struct FlowState {
+                        pub last_tstamp: u64,
+                        pub burst_allowance: u64,
+                    }
+                    unsafe impl aya::Pod for FlowState {}
+
+                    let flow_map_result: Result<HashMap<_, u32, FlowState>, _> = HashMap::try_from(map);
+                    match flow_map_result {
+                        Ok(mut flow_map) => {
+                             let mut keys_to_remove = Vec::new();
+                             // Use same logic for time
+                             if let Ok(uptime_seconds) = std::fs::read_to_string("/proc/uptime") {
+                                if let Some(sec_str) = uptime_seconds.split_whitespace().next() {
+                                    if let Ok(sec_f64) = sec_str.parse::<f64>() {
+                                        let now_ns = (sec_f64 * 1_000_000_000.0) as u64;
+                                        // Flow state expires faster (e.g. 60s)
+                                        let threshold_ns = now_ns.saturating_sub(60 * 1_000_000_000); 
+
+                                        for item in flow_map.iter() {
+                                            if let Ok((k, v)) = item {
+                                                if v.last_tstamp < threshold_ns {
+                                                    keys_to_remove.push(k);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                             }
+
+                             if !keys_to_remove.is_empty() {
+                                info!("🧹 GC: Cleaned up {} stale Flows from TC Pacing Map", keys_to_remove.len());
+                                for k in keys_to_remove {
+                                    let _ = flow_map.remove(&k);
+                                }
+                            }
+                        }
+                        Err(e) => warn!("GC: Failed to access FLOW_STATE_MAP: {}", e),
+                    }
                 }
             }
         });

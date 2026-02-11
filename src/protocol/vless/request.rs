@@ -26,12 +26,15 @@ impl Command {
 
 #[derive(Debug)]
 pub struct VlessRequest {
+    #[allow(dead_code)]
     pub version: u8,
+    #[allow(dead_code)]
     pub uuid: Uuid,
     pub command: Command,
     /// 目标地址
     pub address: Address,
     /// 附加数据长度
+    #[allow(dead_code)]
     pub addon_length: u8,
 }
 

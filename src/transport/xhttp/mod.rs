@@ -1,8 +1,6 @@
-mod grpc;
 mod h2;
 mod server;
 
-pub use grpc::{GrpcHeaders, GrpcMessage, GrpcStatus, GrpcTrailer};
 pub use h2::H2Handler;
 pub use server::XhttpServer;
 

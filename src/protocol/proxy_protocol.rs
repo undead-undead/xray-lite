@@ -11,6 +11,7 @@ pub struct ProxyHeader {
     /// 真实客户端地址
     pub source_addr: SocketAddr,
     /// 目标地址
+    #[allow(dead_code)]
     pub dest_addr: SocketAddr,
 }
 

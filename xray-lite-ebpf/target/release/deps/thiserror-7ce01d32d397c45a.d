@@ -1,0 +1,14 @@
+/home/biubiuboy/xray-lite/xray-lite-ebpf/target/release/deps/thiserror-7ce01d32d397c45a.d: /home/biubiuboy/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.17/src/lib.rs /home/biubiuboy/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.17/src/aserror.rs /home/biubiuboy/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.17/src/display.rs /home/biubiuboy/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.17/src/var.rs /home/biubiuboy/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.17/src/private.rs /home/biubiuboy/xray-lite/xray-lite-ebpf/target/release/build/thiserror-c188facc94e191f0/out/private.rs
+
+/home/biubiuboy/xray-lite/xray-lite-ebpf/target/release/deps/libthiserror-7ce01d32d397c45a.rlib: /home/biubiuboy/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.17/src/lib.rs /home/biubiuboy/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.17/src/aserror.rs /home/biubiuboy/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.17/src/display.rs /home/biubiuboy/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.17/src/var.rs /home/biubiuboy/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.17/src/private.rs /home/biubiuboy/xray-lite/xray-lite-ebpf/target/release/build/thiserror-c188facc94e191f0/out/private.rs
+
+/home/biubiuboy/xray-lite/xray-lite-ebpf/target/release/deps/libthiserror-7ce01d32d397c45a.rmeta: /home/biubiuboy/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.17/src/lib.rs /home/biubiuboy/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.17/src/aserror.rs /home/biubiuboy/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.17/src/display.rs /home/biubiuboy/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.17/src/var.rs /home/biubiuboy/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.17/src/private.rs /home/biubiuboy/xray-lite/xray-lite-ebpf/target/release/build/thiserror-c188facc94e191f0/out/private.rs
+
+/home/biubiuboy/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.17/src/lib.rs:
+/home/biubiuboy/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.17/src/aserror.rs:
+/home/biubiuboy/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.17/src/display.rs:
+/home/biubiuboy/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.17/src/var.rs:
+/home/biubiuboy/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.17/src/private.rs:
+/home/biubiuboy/xray-lite/xray-lite-ebpf/target/release/build/thiserror-c188facc94e191f0/out/private.rs:
+
+# env-dep:OUT_DIR=/home/biubiuboy/xray-lite/xray-lite-ebpf/target/release/build/thiserror-c188facc94e191f0/out

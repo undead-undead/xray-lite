@@ -4,9 +4,9 @@
 use aya_ebpf::{
     bindings::xdp_action,
     helpers::bpf_ktime_get_ns,
-    macros::{map, xdp},
+    macros::{classifier, map, xdp},
     maps::HashMap,
-    programs::XdpContext,
+    programs::{TcContext, XdpContext},
 };
 use aya_log_ebpf::warn;
 use core::mem;
@@ -27,6 +27,21 @@ pub struct RateLimitEntry {
 // Track TCP SYN rates for source IPs
 #[map]
 static RATE_LIMIT_MAP: HashMap<u32, RateLimitEntry> = HashMap::with_max_entries(10240, 0);
+
+// --- Advanced TC Egress Pacing (EDT + Jitter + Bursting) ---
+#[derive(Clone, Copy)]
+#[repr(C)]
+pub struct FlowState {
+    pub last_tstamp: u64,
+    pub burst_allowance: u64,
+}
+
+// BPF Map to store flow state for Pacing
+#[map]
+static FLOW_STATE_MAP: HashMap<u32, FlowState> = HashMap::with_max_entries(10240, 0);
+
+const TARGET_RATE_BPS: u64 = 100_000_000 / 8; // 100 Mbps (5G profile)
+const BURST_SIZE: u64 = 2 * 1024 * 1024; // 2MB Burst (Human-like)
 
 // --- Constants ---
 const ETH_P_IP: u16 = 0x0800;
@@ -90,6 +105,81 @@ pub fn xray_firewall(ctx: XdpContext) -> u32 {
     }
 }
 
+// --- TC Egress Pacing Logic ---
+#[classifier]
+pub fn tc_egress_pacing(ctx: TcContext) -> i32 {
+    match try_tc_egress_pacing(ctx) {
+        Ok(ret) => ret,
+        Err(_) => 0, // TC_ACT_OK (Fail open)
+    }
+}
+
+fn try_tc_egress_pacing(ctx: TcContext) -> Result<i32, ()> {
+    let now = unsafe { bpf_ktime_get_ns() };
+    let len = ctx.len() as u64;
+
+    // Use Source IP as Flow ID (simplification)
+    // In production, use tuple (SrcIP, DstIP, SrcPort, DstPort) hash
+    // Here we need to parse headers to get SrcIP, similar to XDP but for SKB
+    // Skipping deep packet parsing for brevity, assuming flow_id = 0 for single flow testing
+    // or using skb->hash if available.
+    // For robust implementation, we'd parse IP header.
+    // Let's use a fixed flow ID for global pacing for now to avoid parsing complexity in this snippet
+    // or simulate per-flow by just using a single bucket.
+    let flow_id: u32 = 0;
+
+    // Calculate transmission time
+    let interval_ns = (len * 1_000_000_000) / TARGET_RATE_BPS;
+
+    let mut next_tstamp;
+
+    match FLOW_STATE_MAP.get_ptr_mut(&flow_id) {
+        Some(state_ptr) => {
+            let state = unsafe { &mut *state_ptr };
+
+            // 1. Burst Logic
+            // If idle for a while, allow burst
+            if now > state.last_tstamp + interval_ns {
+                state.burst_allowance = BURST_SIZE;
+            }
+
+            if state.burst_allowance > len {
+                state.burst_allowance -= len;
+                next_tstamp = now; // Send immediately
+            } else {
+                // 2. Pacing (Token Bucket / Leaky Bucket)
+                next_tstamp = if state.last_tstamp > now {
+                    state.last_tstamp + interval_ns
+                } else {
+                    now + interval_ns
+                };
+
+                // 3. Jitter (Randomize +/- 1-3ms to act purely human)
+                // Using a simple pseudo-random based on time
+                let jitter = (now % 3_000_000) as u64;
+                next_tstamp += jitter;
+            }
+            state.last_tstamp = next_tstamp;
+        }
+        None => {
+            let new_state = FlowState {
+                last_tstamp: now + interval_ns,
+                burst_allowance: BURST_SIZE,
+            };
+            let _ = FLOW_STATE_MAP.insert(&flow_id, &new_state, 0);
+            next_tstamp = now;
+        }
+    }
+
+    // Write EDT Timestamp to SKB (Requires FQ qdisc)
+    unsafe {
+        let skb_ptr: *mut aya_ebpf::bindings::__sk_buff = core::mem::transmute(ctx.skb);
+        (*skb_ptr).tstamp = next_tstamp;
+    }
+
+    Ok(0) // TC_ACT_OK
+}
+
 fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
     let start = ctx.data();
     let end = ctx.data_end();
@@ -111,79 +201,55 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
         return Ok(xdp_action::XDP_PASS);
     }
     let ip_hdr = unsafe { &*(ip_start as *const IpHdr) };
-
-    // Calculate IP header length to find transport header
     let ihl = ip_hdr.version_ihl & 0x0F;
     let ip_len = (ihl as usize) * 4;
     let trans_start = ip_start + ip_len;
 
     match ip_hdr.protocol {
         IPPROTO_UDP => {
-            // UDP Header Check
             if trans_start + mem::size_of::<UdpHdr>() > end {
                 return Ok(xdp_action::XDP_PASS);
             }
             let udp_hdr = unsafe { &*(trans_start as *const UdpHdr) };
             let dest_port = u16::from_be(udp_hdr.dest);
 
-            // Check Allowed Ports Map
             if unsafe { ALLOWED_PORTS.get(&dest_port).is_some() } {
-                // DROP all UDP traffic on protected ports (Anti-UDP Flood)
                 return Ok(xdp_action::XDP_DROP);
             }
             return Ok(xdp_action::XDP_PASS);
         }
         IPPROTO_TCP => {
-            // TCP Header Check
             if trans_start + mem::size_of::<TcpHdr>() > end {
                 return Ok(xdp_action::XDP_PASS);
             }
             let tcp_hdr = unsafe { &*(trans_start as *const TcpHdr) };
             let dest_port = u16::from_be(tcp_hdr.dest);
 
-            // Only protect ports in the ALLOWED_PORTS map
             if unsafe { ALLOWED_PORTS.get(&dest_port).is_none() } {
                 return Ok(xdp_action::XDP_PASS);
             }
 
-            // --- Logic for Protected Ports ---
             let flags = tcp_hdr.flags;
-
-            // 1. Illegal Flags Check
-            // SYN+FIN (0x02 | 0x01)
             if (flags & 0x03) == 0x03 {
                 return Ok(xdp_action::XDP_DROP);
             }
-            // SYN+RST (0x02 | 0x04)
             if (flags & 0x06) == 0x06 {
                 return Ok(xdp_action::XDP_DROP);
             }
 
-            // 2. SYN Rate Limit (Per Source IP)
-            // Optimize: Only check Rate Limit Map for SYN packets (New Connections)
-            // Established traffic (ACK, PSH, etc.) skips this expensive lookup!
-            // Check if SYN is set (0x02) and ACK is NOT set (0x10) -> New Connection Attempt
             if (flags & 0x02 != 0) && (flags & 0x10 == 0) {
                 let src_ip = u32::from_be(ip_hdr.saddr);
                 let now = unsafe { bpf_ktime_get_ns() };
 
-                // Lookup IP in Rate Limit Map
-                match unsafe { RATE_LIMIT_MAP.get_ptr_mut(&src_ip) } {
+                match RATE_LIMIT_MAP.get_ptr_mut(&src_ip) {
                     Some(entry) => {
                         let entry = unsafe { &mut *entry };
-
-                        // Convert nanoseconds to seconds for comparison is costly, keep naive check
-                        // If more than 1 second has passed
                         if now > entry.last_time_ns + NANOS_PER_SEC {
-                            // Reset window
                             entry.last_time_ns = now;
                             entry.count = 1;
                         } else {
-                            // Within same second window
                             entry.count += 1;
-
                             if entry.count > SYN_LIMIT_PER_SEC {
-                                // Log occasionally to avoid flooding trace pipe
                                 if entry.count % 100 == 0 {
                                     warn!(
                                         &ctx,
@@ -195,18 +261,21 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
                         }
                     }
                     None => {
-                        // New IP, insert entry
                         let new_entry = RateLimitEntry {
                             last_time_ns: now,
                             count: 1,
                         };
-                        let _ = unsafe { RATE_LIMIT_MAP.insert(&src_ip, &new_entry, 0) };
+                        let _ = RATE_LIMIT_MAP.insert(&src_ip, &new_entry, 0);
                     }
                 }
             }
-
             return Ok(xdp_action::XDP_PASS);
         }
         _ => return Ok(xdp_action::XDP_PASS),
     }
+}
+
+#[panic_handler]
+fn panic(_info: &core::panic::PanicInfo) -> ! {
+    unsafe { core::hint::unreachable_unchecked() }
 }

@@ -224,13 +224,6 @@ impl Config {
 
         Ok(config)
     }
-
-    /// 保存配置到文件
-    pub fn save<P: AsRef<Path>>(&self, path: P) -> Result<()> {
-        let content = serde_json::to_string_pretty(self)?;
-        fs::write(path, content)?;
-        Ok(())
-    }
 }
 
 #[cfg(test)]

@@ -1,7 +1,6 @@
 use anyhow::Result;
 use base64::{engine::general_purpose, Engine as _};
 use rand::rngs::OsRng;
-use rand::RngCore;
 use x25519_dalek::{PublicKey, StaticSecret};
 
 fn main() -> Result<()> {
