@@ -40,7 +40,7 @@ pub struct FlowState {
 #[map]
 static FLOW_STATE_MAP: HashMap<u32, FlowState> = HashMap::with_max_entries(10240, 0);
 
-const TARGET_RATE_BPS: u64 = 200_000_000 / 8; // 200 Mbps (Optimized for 4K/8K)
+const TARGET_RATE_BPS: u64 = 500_000_000 / 8; // 500 Mbps (High Performance Mode)
 const BURST_SIZE: u64 = 4 * 1024 * 1024; // 4MB Burst (Smooth SABR emulation)
 
 // --- Constants ---
