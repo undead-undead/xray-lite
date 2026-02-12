@@ -243,9 +243,10 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
             let dest_port = u16::from_be(udp_hdr.dest);
 
             if unsafe { ALLOWED_PORTS.get(&dest_port).is_some() } {
-                return Ok(xdp_action::XDP_DROP);
+                return Ok(xdp_action::XDP_PASS); // FIX: Was DROP, must be PASS
             }
-            return Ok(xdp_action::XDP_PASS);
+            // Block other UDP (QUIC/DNS amplification protection)
+            return Ok(xdp_action::XDP_DROP);
         }
         IPPROTO_TCP => {
             if trans_start + mem::size_of::<TcpHdr>() > end {
