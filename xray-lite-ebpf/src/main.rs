@@ -42,7 +42,7 @@ pub struct FlowState {
 static FLOW_STATE_MAP: HashMap<u32, FlowState> = HashMap::with_max_entries(10240, 0);
 
 const TARGET_RATE_BPS: u64 = 500_000_000 / 8; // 500 Mbps (High Performance Mode)
-const BURST_SIZE: u64 = 1 * 1024 * 1024; // 1MB Burst (Optimal for Stability & 4K)
+const BURST_SIZE: u64 = 2 * 1024 * 1024; // 2MB Burst (Better for 4K & Gigabit)
 
 // --- Constants ---
 const ETH_P_IP: u16 = 0x0800;
@@ -137,6 +137,15 @@ fn try_tc_egress_pacing(ctx: TcContext) -> Result<i32, ()> {
     match FLOW_STATE_MAP.get_ptr_mut(&flow_id) {
         Some(state_ptr) => {
             let state = unsafe { &mut *state_ptr };
+
+            // 0. Anti-Accumulation Reset (Relief Valve)
+            // If we are too far behind (e.g. > 5ms debt), reset to avoid killing TCP
+            // This prevents the "40000 -> 1000" speed collapse
+            if state.last_tstamp > now + 5_000_000 {
+                state.last_tstamp = now;
+                // Optionally clear burst to avoid double-dipping, but for performance let's keep it lenient
+                // state.burst_allowance = 0;
+            }
 
             // 1. Burst Logic
             // If idle for a while, allow burst
