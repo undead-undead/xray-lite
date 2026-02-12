@@ -163,7 +163,9 @@ fn try_tc_egress_pacing(ctx: TcContext) -> Result<i32, ()> {
         }
         None => {
             let mut data = [0u64; 2];
-            let next_t_val = now + interval_ns;
+            // FIX: Initialize new flow with NO debt.
+            // Setting it to `now` means the first packet is allowed to go immediately.
+            let next_t_val = now;
             let p = data.as_mut_ptr();
 
             unsafe {
