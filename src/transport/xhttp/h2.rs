@@ -125,6 +125,12 @@ impl H2Handler {
             builder.handshake(stream)
         ).await??;
 
+        // --- XTLS-Reality64 Dynamic Upgrade ---
+        // 握手成功后，立即将连接窗口从 64KB (Nginx Mimic) 动态提升至 5MB (High Perf)
+        // 这对应了 README 中的 "Dynamic Upgrade" 机制，解决单流吞吐瓶颈
+        connection.set_target_window_size(5 * 1024 * 1024);
+        debug!("XHTTP: Connection window dynamically upgraded to 5MB");
+
         // --- 🌟 H2 Ping-Pong 随机心跳混淆 (V89) ---
         // 获取 PingPong 句柄，启动后台任务随机发送 PING
         // 这会迫使客户端回复 ACK，制造双向的背景流量噪声，干扰时序分析。
