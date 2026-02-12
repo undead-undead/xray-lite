@@ -49,7 +49,7 @@ const ETH_P_IP: u16 = 0x0800;
 const IPPROTO_TCP: u8 = 6;
 const IPPROTO_UDP: u8 = 17;
 // CONFIG: Max SYN packets per second per IP
-const SYN_LIMIT_PER_SEC: u32 = 50;
+const SYN_LIMIT_PER_SEC: u32 = 1000; // Relaxed from 50 -> 1000 (Prevents false positives)
 const NANOS_PER_SEC: u64 = 1_000_000_000;
 
 // --- Struct Definitions ---
@@ -200,10 +200,11 @@ fn try_tc_egress_pacing(ctx: TcContext) -> Result<i32, ()> {
     }
 
     // Write EDT Timestamp to SKB (Requires FQ qdisc)
-    unsafe {
-        let skb_ptr: *mut aya_ebpf::bindings::__sk_buff = core::mem::transmute(ctx.skb);
-        (*skb_ptr).tstamp = next_tstamp;
-    }
+    // BYPASS MODE: Temporarily disable pacing enforcement to restore raw speed
+    // unsafe {
+    //     let skb_ptr: *mut aya_ebpf::bindings::__sk_buff = core::mem::transmute(ctx.skb);
+    //     (*skb_ptr).tstamp = next_tstamp;
+    // }
 
     Ok(0) // TC_ACT_OK
 }
