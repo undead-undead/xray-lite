@@ -85,7 +85,13 @@ pub mod loader {
             return;
         }
 
-        // 显式创建 clsact 队列
+        // --- 防止过滤器堆叠：先清理旧的 clsact 队列 ---
+        // 如果 clsact 不存在，删除会报错，我们忽略它
+        let _ = std::process::Command::new("tc")
+            .args(&["qdisc", "del", "dev", &iface_name, "clsact"])
+            .output();
+
+        // 显式重新创建 clsact 队列
         let _ = std::process::Command::new("tc")
             .args(&["qdisc", "add", "dev", &iface_name, "clsact"])
             .output();
