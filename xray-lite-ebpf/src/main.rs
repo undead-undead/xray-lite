@@ -156,8 +156,9 @@ fn try_tc_egress_pacing(ctx: TcContext) -> Result<i32, ()> {
                 };
 
                 // 3. Jitter (Randomize +/- 1-3ms to act purely human)
-                // Using a simple pseudo-random based on time
-                let jitter = (now % 3_000_000) as u64;
+                // Using strong kernel pseudo-random generator to evade ML detection
+                let jitter =
+                    (unsafe { aya_ebpf::helpers::bpf_get_prandom_u32() } % 3_000_000) as u64;
                 next_tstamp += jitter;
             }
             state.last_tstamp = next_tstamp;
