@@ -200,11 +200,10 @@ fn try_tc_egress_pacing(ctx: TcContext) -> Result<i32, ()> {
     }
 
     // Write EDT Timestamp to SKB (Requires FQ qdisc)
-    // BYPASS MODE: Temporarily disable pacing enforcement to restore raw speed
-    // unsafe {
-    //     let skb_ptr: *mut aya_ebpf::bindings::__sk_buff = core::mem::transmute(ctx.skb);
-    //     (*skb_ptr).tstamp = next_tstamp;
-    // }
+    unsafe {
+        let skb_ptr: *mut aya_ebpf::bindings::__sk_buff = core::mem::transmute(ctx.skb);
+        (*skb_ptr).tstamp = next_tstamp;
+    }
 
     Ok(0) // TC_ACT_OK
 }
