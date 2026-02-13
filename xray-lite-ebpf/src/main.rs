@@ -200,10 +200,11 @@ fn try_tc_egress_pacing(ctx: TcContext) -> Result<i32, ()> {
     }
 
     // Write EDT Timestamp to SKB (Requires FQ qdisc)
-    unsafe {
-        let skb_ptr: *mut aya_ebpf::bindings::__sk_buff = core::mem::transmute(ctx.skb);
-        (*skb_ptr).tstamp = next_tstamp;
-    }
+    // DISABLED for v0.6.1-stable: Relying on Kernel FQ only.
+    // unsafe {
+    //     let skb_ptr: *mut aya_ebpf::bindings::__sk_buff = core::mem::transmute(ctx.skb);
+    //     (*skb_ptr).tstamp = next_tstamp;
+    // }
 
     Ok(0) // TC_ACT_OK
 }
