@@ -66,6 +66,8 @@ pub mod loader {
         }
 
         // 3. 挂载 TC Pacing 程序
+        // DISABLED: Completely disable TC loading to ensure 0 interference (Full Speed Mode)
+        /* 
         info!("🚄 初始化 TC Egress Pacing (Smart Micro-Jitter Mode)...");
         let tc_prog: &mut SchedClassifier = match bpf.program_mut("tc_egress_pacing") {
             Some(p) => match p.try_into() {
@@ -102,6 +104,8 @@ pub mod loader {
         } else {
             info!("🚄 TC Egress Pacing (Micro-Jitter) 已成功激活！");
         }
+        */
+        info!("🚄 TC Pacing 已禁用 (使用 Kernel Native FQ, 100% Speed)");
 
         // 4. 配置端口白名单
         match bpf.map_mut("ALLOWED_PORTS") {

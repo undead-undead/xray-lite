@@ -115,41 +115,9 @@ pub fn tc_egress_pacing(ctx: TcContext) -> i32 {
     }
 }
 
-fn try_tc_egress_pacing(ctx: TcContext) -> Result<i32, ()> {
-    let now = unsafe { bpf_ktime_get_ns() };
-
-    // 1. Get raw SKB pointer (Transmute ctx.skb once to avoid Move errors)
-    let skb_ptr: *mut aya_ebpf::bindings::__sk_buff = unsafe { core::mem::transmute(ctx.skb) };
-
-    // 2. Read existing timestamp
-    let mut tstamp = unsafe { (*skb_ptr).tstamp };
-
-    // 3. Micro-Jitter Logic
-    // Only apply jitter if BBR has already set a pacing time.
-    if tstamp != 0 {
-        // Generate random jitter: 0 ~ 500 microseconds (0.5ms)
-        // 0.5ms is small enough to be ignored by BBR's RTT filter,
-        // but large enough to randomize Inter-Arrival Time for DPI.
-        let jitter_ns = (unsafe { aya_ebpf::helpers::bpf_get_prandom_u32() } % 500_000) as u64;
-
-        // Apply jitter, ensuring we don't accidentally schedule into the past relative to now
-        // (though FQ handles past timestamps by sending immediately)
-        if tstamp > now {
-            tstamp += jitter_ns;
-        } else {
-            tstamp = now + jitter_ns;
-        }
-    } else {
-        // Non-TCP or CUBIC traffic (no pacing set): Send immediately
-        // We do NOT delay these packets to avoid latency spikes on ACKs/DNS.
-        tstamp = now;
-    }
-
-    // 4. Write modified timestamp back to SKB
-    unsafe {
-        (*skb_ptr).tstamp = tstamp;
-    }
-
+fn try_tc_egress_pacing(_ctx: TcContext) -> Result<i32, ()> {
+    // 1. No-Op Logic (Full Speed)
+    // We do NOT touch skb->tstamp. Let Kernel FQ/BBR handle everything.
     Ok(0) // TC_ACT_OK
 }
 
