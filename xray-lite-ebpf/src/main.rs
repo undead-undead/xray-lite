@@ -267,64 +267,12 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
                 return Ok(xdp_action::XDP_DROP);
             }
 
-            if (flags & 0x02 != 0) && (flags & 0x10 == 0) {
-                let src_ip = u32::from_be(ip_hdr.saddr);
-                let now = unsafe { bpf_ktime_get_ns() };
-
-                match RATE_LIMIT_MAP.get_ptr_mut(&src_ip) {
-                    Some(entry_ptr) => {
-                        let entry = unsafe { &mut *entry_ptr };
-                        let last_time = entry.last_time_ns;
-                        let count = entry.count;
-
-                        if now > last_time + NANOS_PER_SEC {
-                            unsafe {
-                                core::ptr::write_volatile(&mut entry.last_time_ns, now);
-                                core::ptr::write_volatile(&mut entry.count, 1u64);
-                            }
-                        } else {
-                            let new_count = count + 1;
-                            unsafe {
-                                core::ptr::write_volatile(&mut entry.count, new_count);
-                            }
-
-                            if new_count > SYN_LIMIT_PER_SEC as u64 {
-                                if new_count % 100 == 0 {
-                                    warn!(
-                                        &ctx,
-                                        "⛔ RATELIMIT: Dropped SYN flood from IP {:x}", src_ip
-                                    );
-                                }
-                                return Ok(xdp_action::XDP_DROP);
-                            }
-                        }
-                    }
-                    None => {
-                        let mut data = [0u64; 2];
-                        let now_val = now;
-                        let p = data.as_mut_ptr();
-
-                        unsafe {
-                            // Golden Version Strategy: Magic Numbers (0xDEAD)
-                            core::arch::asm!(
-                                "*(u64 *)({0} + 0) = {1}",
-                                "*(u32 *)({0} + 8) = 0xDE",   // Magic Low
-                                "*(u32 *)({0} + 12) = 0xAD",  // Magic High (Padding)
-                                in(reg) p,
-                                in(reg) now_val,
-                            );
-
-                            // Direct helper call using the physical pointer
-                            aya_ebpf::helpers::bpf_map_update_elem(
-                                &RATE_LIMIT_MAP as *const _ as *mut _,
-                                &src_ip as *const _ as *const _,
-                                data.as_ptr() as *const _ as *const _,
-                                0,
-                            );
-                        }
-                    }
-                }
-            }
+            // Bypass SYN Limit for diagnosis
+            // if (flags & 0x02 != 0) && (flags & 0x10 == 0) {
+            //     let src_ip = u32::from_be(ip_hdr.saddr);
+            //     // ... (Existing logic commented out) ...
+            //     return Ok(xdp_action::XDP_PASS);
+            // }
             return Ok(xdp_action::XDP_PASS);
         }
         _ => return Ok(xdp_action::XDP_PASS),
