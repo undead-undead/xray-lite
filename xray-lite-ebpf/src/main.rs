@@ -49,7 +49,7 @@ const ETH_P_IP: u16 = 0x0800;
 const IPPROTO_TCP: u8 = 6;
 const IPPROTO_UDP: u8 = 17;
 // CONFIG: Max SYN packets per second per IP
-const SYN_LIMIT_PER_SEC: u32 = 1000; // Relaxed from 50 -> 1000 (Prevents false positives)
+const SYN_LIMIT_PER_SEC: u32 = 10000; // Relaxed to 10000 to prevent blocking legitimate bursts (YouTube/QUIC)
 const NANOS_PER_SEC: u64 = 1_000_000_000;
 
 // --- Struct Definitions ---
