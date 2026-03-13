@@ -110,10 +110,13 @@ impl RealityServerRustls {
                 warn!("Reality SNI mismatch: {:?} (Allowed: {:?})", info.server_name, self.server_names);
                 // Fallthrough to fallback (don't verify reality)
             } else if let Some((offset, auth_key)) = self.verify_client_reality(&info, &buffer) {
-                let dest_str = self.reality_config.dest.as_deref().unwrap_or("www.microsoft.com");
-                let dest_host = dest_str.split(':').next().unwrap_or("www.microsoft.com");
-
                 info!("Reality: Verified client (Offset {}), generating dynamic signature-certificate", offset);
+
+                // 当 dest 为 UDS 路径时无法作为有效的 DNS 名称生成证书
+                // 故，优先使用客户端握手携带的真实 SNI，其次回退到配置允许的第一个 server_name，最后设为默认值
+                let dest_host = info.server_name.as_deref()
+                    .or_else(|| self.server_names.first().map(|s| s.as_str()))
+                    .unwrap_or("www.microsoft.com");
                 
                 let (cert, key) = self.generate_reality_cert(&auth_key, dest_host)?;
 
@@ -132,6 +135,7 @@ impl RealityServerRustls {
                 let acceptor = TlsAcceptor::from(Arc::new(config));
                 let prefixed = PrefixedStream::new(buffer, stream);
                 
+                // 核心修复：为 TLS 握手添加超时保护 (5s)
                 match tokio::time::timeout(std::time::Duration::from_secs(5), acceptor.accept(prefixed)).await {
                     Ok(Ok(tls)) => {
                         info!("Reality handshake successful");
@@ -148,13 +152,13 @@ impl RealityServerRustls {
                 }
             }
         }
- 
+
         let dest = self.reality_config.dest.as_deref().unwrap_or("www.microsoft.com:443");
         debug!("Non-Reality client or SNI mismatch, falling back to {}", dest);
         self.fallback(stream, &buffer, dest).await?;
         bail!("Fallback total");
     }
- 
+
     fn verify_client_reality(&self, info: &ClientHelloInfo<'_>, full_hello: &[u8]) -> Option<(usize, [u8; 32])> {
         if info.session_id.len() != 32 || info.public_key.is_none() { return None; }
         
@@ -168,29 +172,29 @@ impl RealityServerRustls {
         let hk = Hkdf::<Sha256>::new(Some(&info.client_random[0..20]), shared.as_bytes());
         let mut auth_key = [0u8; 32];
         if hk.expand(b"REALITY", &mut auth_key).is_err() { return None; }
- 
+
         let cipher = Aes256Gcm::new(aes_gcm::Key::<Aes256Gcm>::from_slice(&auth_key));
         let nonce = Nonce::from_slice(&info.client_random[20..32]);
- 
+
         let handshake_msg = if full_hello[0] == 0x16 { &full_hello[5..] } else { full_hello };
         let mut aad = handshake_msg.to_vec();
-        
+
         // Optimize: search for session_id slice directly instead of hex-encoding
         if let Some(pos) = aad.windows(info.session_id.len()).position(|window| window == info.session_id) {
             for i in 0..32 { if pos + i < aad.len() { aad[pos + i] = 0; } }
         }
- 
+
         let mut buf = info.session_id.to_vec();
         if cipher.decrypt_in_place(nonce, &aad, &mut buf).is_err() { return None; }
         if buf.len() < 16 { return None; }
- 
+
         for sid in &self.reality_config.short_ids {
             if sid == &buf[4..12] { return Some((4, auth_key)); }
             if sid == &buf[8..16] { return Some((8, auth_key)); }
         }
         None
     }
- 
+
     fn generate_reality_cert(&self, auth_key: &[u8; 32], host: &str) -> Result<(CertificateDer<'static>, PrivateKeyDer<'static>)> {
         let key = CertKey {
             host: host.to_string(),
@@ -264,21 +268,58 @@ impl RealityServerRustls {
         let result_key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(priv_key_der));
         Ok((result_cert, result_key))
     }
- 
+
     async fn fallback<S>(&self, stream: S, prefix: &[u8], dest: &str) -> Result<()> 
     where S: AsyncRead + AsyncWrite + Unpin + Send + 'static {
-        // Fallback connection with timeout
-        let mut dest_stream = match tokio::time::timeout(std::time::Duration::from_secs(10), TcpStream::connect(dest)).await {
+        let is_uds = dest.starts_with('/') || dest.starts_with('@');
+
+        #[cfg(unix)]
+        if is_uds {
+            use tokio::net::UnixStream;
+            let mut path = dest.to_string();
+            // Xray 标准：支持 Linux Abstract Socket (以 @ 开头映射为 \0)
+            if path.starts_with('@') {
+                path.replace_range(0..1, "\0");
+            }
+
+            let mut dest_stream = match tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                UnixStream::connect(path)
+            ).await {
+                Ok(Ok(s)) => s,
+                Ok(Err(e)) => return Err(anyhow!("Fallback UDS connection error: {}", e)),
+                Err(_) => bail!("Fallback UDS connection timeout"),
+            };
+            
+            dest_stream.write_all(prefix).await?;
+
+            // 使用 ProxyConnection 以获得闲置超时保护
+            let connection = crate::network::ProxyConnection::new(stream, dest_stream);
+            connection.relay().await?;
+            return Ok(());
+        }
+
+        #[cfg(not(unix))]
+        if is_uds {
+            bail!("Unix Domain Socket fallback is not supported on this platform");
+        }
+
+        // 默认 TCP 回退逻辑
+        // 核心修复：为回退连接添加超时保护 (10s)
+        let mut dest_stream = match tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            TcpStream::connect(dest)
+        ).await {
             Ok(Ok(s)) => s,
-            Ok(Err(e)) => bail!("Fallback connect failed: {}", e),
-            Err(_) => bail!("Fallback connect timeout"),
+            Ok(Err(e)) => return Err(anyhow!("Fallback TCP connection error: {}", e)),
+            Err(_) => bail!("Fallback TCP connection timeout"),
         };
         dest_stream.write_all(prefix).await?;
-        
+
         // 使用 ProxyConnection 以获得闲置超时保护
         let connection = crate::network::ProxyConnection::new(stream, dest_stream);
         connection.relay().await?;
-        
+
         Ok(())
     }
 }
